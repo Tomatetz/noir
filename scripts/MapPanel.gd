@@ -919,24 +919,29 @@ func _draw_rain() -> void:
 	if game == null or size.x <= 0.0 or size.y <= 0.0:
 		return
 	var time: float = Time.get_ticks_msec() * 0.001
-	var rain_direction := Vector2(-0.33, 1.0).normalized()
+	var gust_angle: float = -0.22 + sin(time * 0.17) * 0.05
+	var base_rain_direction := Vector2(gust_angle, 1.0).normalized()
 	var wrap_size := size + Vector2(260.0, 260.0)
 	for i in range(RAIN_STREAK_COUNT):
 		var h1: float = _hash01(rain_seed + i * 37)
 		var h2: float = _hash01(rain_seed + i * 53 + 11)
 		var h3: float = _hash01(rain_seed + i * 71 + 23)
-		var speed: float = lerp(125.0, 260.0, h3)
-		var x: float = fposmod(h1 * wrap_size.x + time * speed * 0.28, wrap_size.x) - 130.0
-		var y: float = fposmod(h2 * wrap_size.y + time * speed, wrap_size.y) - 130.0
+		var h4: float = _hash01(rain_seed + i * 89 + 41)
+		var h5: float = _hash01(rain_seed + i * 97 + 67)
+		var rain_direction: Vector2 = base_rain_direction.rotated(lerp(-0.10, 0.10, h4))
+		var speed: float = lerp(155.0, 360.0, pow(h3, 0.72))
+		var travel: Vector2 = rain_direction * time * speed
+		var x: float = fposmod(h1 * wrap_size.x + travel.x, wrap_size.x) - 130.0
+		var y: float = fposmod(h2 * wrap_size.y + travel.y, wrap_size.y) - 130.0
 		var start := Vector2(x, y)
-		var length: float = lerp(24.0, 54.0, h2)
-		var end := start + rain_direction * length
+		var length: float = lerp(10.0, 70.0, pow(h5, 1.75))
+		var end := start - rain_direction * length
 		var mid_world: Vector2 = _to_world((start + end) * 0.5)
 		var headlight_factor: float = _headlight_weather_factor(mid_world)
-		var alpha: float = lerp(0.075, 0.16, h3) + headlight_factor * 0.34
+		var alpha: float = lerp(0.045, 0.18, h3) + headlight_factor * lerp(0.20, 0.42, h5)
 		var rain_color: Color = Color("#d8eeee").lerp(Color("#caffd7"), min(0.75, headlight_factor))
 		rain_color.a = min(alpha, 0.68)
-		draw_line(start, end, rain_color, lerp(0.85, 1.55, headlight_factor), true)
+		draw_line(start, end, rain_color, lerp(0.65, 1.45, headlight_factor), true)
 
 func _hash01(value: int) -> float:
 	return fposmod(sin(float(value) * 12.9898) * 43758.5453, 1.0)
