@@ -13,10 +13,151 @@ func _process(_delta: float) -> void:
 func _draw() -> void:
 	if map == null or map.game == null:
 		return
+	_draw_rain()
+	_draw_rain_impacts()
+	_draw_route_overlay()
+	_draw_destination_overlay()
 	_draw_hover_card()
 	_draw_legend()
 	if not map.fullscreen_view:
 		_draw_minimap()
+
+func _draw_rain() -> void:
+	if size.x <= 0.0 or size.y <= 0.0:
+		return
+	var time: float = Time.get_ticks_msec() * 0.001
+	var gust_angle: float = -0.22 + sin(time * 0.17) * 0.05
+	var base_rain_direction := Vector2(gust_angle, 1.0).normalized()
+	var wrap_size := size + Vector2(260.0, 260.0)
+	for i in range(map.RAIN_STREAK_COUNT):
+		var h1: float = map._hash01(map.rain_seed + i * 37)
+		var h2: float = map._hash01(map.rain_seed + i * 53 + 11)
+		var h3: float = map._hash01(map.rain_seed + i * 71 + 23)
+		var h4: float = map._hash01(map.rain_seed + i * 89 + 41)
+		var h5: float = map._hash01(map.rain_seed + i * 97 + 67)
+		var rain_direction: Vector2 = base_rain_direction.rotated(lerp(-0.10, 0.10, h4))
+		var speed: float = lerp(155.0, 360.0, pow(h3, 0.72))
+		var travel: Vector2 = rain_direction * time * speed
+		var x: float = fposmod(h1 * wrap_size.x + travel.x, wrap_size.x) - 130.0
+		var y: float = fposmod(h2 * wrap_size.y + travel.y, wrap_size.y) - 130.0
+		var start := Vector2(x, y)
+		var length: float = lerp(10.0, 70.0, pow(h5, 1.75))
+		var end := start - rain_direction * length
+		var headlight_factor: float = _screen_headlight_factor((start + end) * 0.5)
+		var alpha: float = lerp(0.025, 0.085, h3) + headlight_factor * lerp(0.06, 0.16, h5)
+		var rain_color: Color = Color("#d8eeee").lerp(Color("#caffd7"), min(0.75, headlight_factor))
+		rain_color.a = min(alpha, 0.28)
+		draw_line(start, end, rain_color, lerp(0.35, 0.85, headlight_factor), true)
+
+func _draw_route_overlay() -> void:
+	if map.current_route_points.size() < 2:
+		return
+	var left_track: Array[Vector2] = []
+	var right_track: Array[Vector2] = []
+	var track_half_width := 6.0
+	for i in range(map.current_route_points.size()):
+		var point: Vector2 = map.current_route_points[i]
+		var tangent: Vector2
+		if i == 0:
+			tangent = map.current_route_points[min(i + 1, map.current_route_points.size() - 1)] - point
+		elif i == map.current_route_points.size() - 1:
+			tangent = point - map.current_route_points[i - 1]
+		else:
+			tangent = map.current_route_points[i + 1] - map.current_route_points[i - 1]
+		if tangent.length() <= 0.01:
+			tangent = Vector2.RIGHT
+		var normal := tangent.normalized().orthogonal()
+		left_track.append(map._to_screen(point + normal * track_half_width))
+		right_track.append(map._to_screen(point - normal * track_half_width))
+	_draw_route_overlay_track(left_track)
+	_draw_route_overlay_track(right_track)
+
+func _draw_route_overlay_track(points: Array[Vector2]) -> void:
+	var dash := 7.0
+	var gap := 10.0
+	var draw_dash := true
+	var remaining := dash
+	for i in range(points.size() - 1):
+		var a := points[i]
+		var b := points[i + 1]
+		var segment := b - a
+		var segment_len := segment.length()
+		if segment_len <= 0.01:
+			continue
+		var direction := segment / segment_len
+		var cursor := 0.0
+		while cursor < segment_len:
+			var step = min(remaining, segment_len - cursor)
+			if draw_dash:
+				var p1: Vector2 = a + direction * cursor
+				var p2: Vector2 = a + direction * (cursor + step)
+				draw_line(p1, p2, Color("#45ff87", 0.18), 4.5, true)
+				draw_line(p1, p2, Color("#baffcb", 0.62), 1.45, true)
+			cursor += step
+			remaining -= step
+			if remaining <= 0.01:
+				draw_dash = not draw_dash
+				remaining = dash if draw_dash else gap
+
+func _draw_destination_overlay() -> void:
+	if not map.game.is_traveling:
+		return
+	var screen_pos: Vector2 = map._to_screen(map.game.travel_final_pos)
+	if not Rect2(Vector2(-40.0, -40.0), size + Vector2(80.0, 80.0)).has_point(screen_pos):
+		return
+	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.007)
+	draw_circle(screen_pos, lerp(9.0, 15.0, pulse), Color("#dfffd8", 0.12))
+	draw_arc(screen_pos, lerp(15.0, 22.0, pulse), 0.0, TAU, 42, Color("#eaffdf", 0.72), 1.7, true)
+	draw_line(screen_pos + Vector2(-10.0, 0.0), screen_pos + Vector2(10.0, 0.0), Color("#eaffdf", 0.75), 1.2, true)
+	draw_line(screen_pos + Vector2(0.0, -10.0), screen_pos + Vector2(0.0, 10.0), Color("#eaffdf", 0.75), 1.2, true)
+
+func _screen_headlight_factor(screen_pos: Vector2) -> float:
+	if map == null or map.game == null:
+		return 0.0
+	var car_screen: Vector2 = map._to_screen(map.game.player_pos)
+	var forward := Vector2.RIGHT.rotated(map.game.vehicle_angle)
+	if map.game.is_traveling and map.game.vehicle_velocity.length() > 2.0:
+		forward = map.game.vehicle_velocity.normalized()
+	var side := forward.orthogonal()
+	var relative: Vector2 = screen_pos - car_screen
+	var along: float = relative.dot(forward)
+	if along <= 0.0 or along > 620.0:
+		return 0.0
+	var lateral: float = abs(relative.dot(side))
+	var spread: float = along * 0.52 + 34.0
+	var cone: float = clamp(1.0 - lateral / spread, 0.0, 1.0)
+	var distance_fade: float = clamp(1.0 - along / 620.0, 0.0, 1.0)
+	return pow(cone, 1.2) * pow(distance_fade, 0.6)
+
+func _draw_rain_impacts() -> void:
+	for impact in map.rain_impacts:
+		var age: float = float(impact["age"])
+		var life: float = max(0.01, float(impact["life"]))
+		var t: float = clamp(age / life, 0.0, 1.0)
+		var world_pos: Vector2 = impact["world_pos"]
+		var screen_pos: Vector2 = map._to_screen(world_pos)
+		if not Rect2(Vector2(-32.0, -32.0), size + Vector2(64.0, 64.0)).has_point(screen_pos):
+			continue
+		var light_factor: float = max(float(impact["light"]), map._headlight_weather_factor(world_pos))
+		var radius: float = lerp(1.5, float(impact["radius"]), t)
+		var fade: float = pow(1.0 - t, 1.05)
+		var color: Color = Color("#d6f3f4").lerp(Color("#e6ffe3"), min(0.9, light_factor))
+		color.a = fade * lerp(0.72, 1.0, light_factor)
+		var seed: int = int(impact["seed"])
+		var start_angle: float = map._hash01(seed) * TAU
+		var arc_len: float = lerp(2.4, 5.2, map._hash01(seed + 17))
+		draw_circle(screen_pos, max(1.8, radius * 0.24), Color(color.r, color.g, color.b, color.a * 0.42))
+		draw_arc(screen_pos, radius, start_angle, start_angle + arc_len, 18, color, lerp(1.8, 3.2, light_factor), true)
+		draw_arc(screen_pos, radius * 0.58, start_angle + 0.8, start_angle + arc_len * 0.72 + 0.8, 12, Color(color.r, color.g, color.b, color.a * 0.54), lerp(1.0, 2.0, light_factor), true)
+		for j in range(3):
+			var spoke_angle: float = start_angle + TAU * map._hash01(seed + j * 29 + 101)
+			var spoke_dir := Vector2.RIGHT.rotated(spoke_angle)
+			var spoke_len: float = radius * lerp(0.42, 0.86, map._hash01(seed + j * 31 + 113))
+			var spoke_color := Color(color.r, color.g, color.b, color.a * 0.68)
+			draw_line(screen_pos + spoke_dir * radius * 0.12, screen_pos + spoke_dir * spoke_len, spoke_color, lerp(1.0, 1.8, light_factor), true)
+		var glint_color := Color("#f1ffe8", fade * lerp(0.28, 0.84, light_factor))
+		draw_line(screen_pos + Vector2(-radius * 0.90, 0.0), screen_pos + Vector2(radius * 0.90, 0.0), glint_color, 1.25, true)
+		draw_line(screen_pos + Vector2(0.0, -radius * 0.38), screen_pos + Vector2(0.0, radius * 0.38), Color(glint_color.r, glint_color.g, glint_color.b, glint_color.a * 0.58), 0.9, true)
 
 func _draw_hover_card() -> void:
 	if map.hovered_district == -1:

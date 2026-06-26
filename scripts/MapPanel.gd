@@ -5,7 +5,8 @@ const NODE_HIT_RADIUS := 42.0
 const VEHICLE_TEXTURE_SCALE := 0.052
 const MAP_BACKGROUND := Color("#111c1f")
 const CLOUD_POOL_SIZE := 104
-const RAIN_STREAK_COUNT := 240
+const RAIN_STREAK_COUNT := 180
+const RAIN_IMPACT_RATE := 95.0
 
 var car_texture: Texture2D
 var light_front_texture: Texture2D
@@ -84,6 +85,8 @@ var cloud_props := []
 var cloud_rng := RandomNumberGenerator.new()
 var cloud_wind_velocity := Vector2(7.0, -3.0)
 var rain_seed := 0
+var rain_impact_accumulator := 0.0
+var rain_impacts: Array[Dictionary] = []
 var overlay: Control
 
 var game: Control
@@ -818,6 +821,7 @@ func _process(delta: float) -> void:
 		return
 	_update_pirate(delta)
 	_update_damage_popups(delta)
+	_update_rain_impacts(delta)
 	_update_destination_marker()
 	_update_world_nodes(delta)
 	_update_cloud_props(delta)
@@ -900,7 +904,6 @@ func _draw() -> void:
 	_clamp_camera()
 	draw_rect(Rect2(Vector2.ZERO, size), MAP_BACKGROUND, true)
 	_draw_ground()
-	_draw_rain()
 	_draw_node_labels()
 	_draw_vehicle()
 	if overlay != null:
@@ -942,6 +945,80 @@ func _draw_rain() -> void:
 		var rain_color: Color = Color("#d8eeee").lerp(Color("#caffd7"), min(0.75, headlight_factor))
 		rain_color.a = min(alpha, 0.68)
 		draw_line(start, end, rain_color, lerp(0.65, 1.45, headlight_factor), true)
+
+func _update_rain_impacts(delta: float) -> void:
+	if game == null or size.x <= 0.0 or size.y <= 0.0:
+		return
+	rain_impact_accumulator += delta * RAIN_IMPACT_RATE
+	while rain_impact_accumulator >= 1.0:
+		rain_impact_accumulator -= 1.0
+		_spawn_rain_impact()
+	for i in range(rain_impacts.size() - 1, -1, -1):
+		var impact: Dictionary = rain_impacts[i]
+		impact["age"] = float(impact["age"]) + delta
+		if float(impact["age"]) >= float(impact["life"]):
+			rain_impacts.remove_at(i)
+		else:
+			rain_impacts[i] = impact
+
+func _spawn_rain_impact() -> void:
+	var world_pos: Vector2
+	var prefer_headlight: bool = road_bump_rng.randf() < 0.72
+	if prefer_headlight:
+		var forward := Vector2.RIGHT.rotated(game.vehicle_angle)
+		if game.is_traveling and game.vehicle_velocity.length() > 2.0:
+			forward = game.vehicle_velocity.normalized()
+		var along: float = road_bump_rng.randf_range(75.0, 620.0)
+		var side := forward.orthogonal()
+		var spread: float = along * 0.44 + 24.0
+		world_pos = game.player_pos + forward * along + side * road_bump_rng.randf_range(-spread, spread)
+	else:
+		world_pos = camera_offset + Vector2(
+			road_bump_rng.randf_range(0.0, size.x),
+			road_bump_rng.randf_range(0.0, size.y)
+		)
+	world_pos.x = clamp(world_pos.x, 0.0, WORLD_SIZE.x)
+	world_pos.y = clamp(world_pos.y, 0.0, WORLD_SIZE.y)
+	var light_factor: float = _headlight_weather_factor(world_pos)
+	rain_impacts.append({
+		"world_pos": world_pos,
+		"age": 0.0,
+		"life": road_bump_rng.randf_range(0.34, 0.68),
+		"radius": road_bump_rng.randf_range(7.0, 18.0),
+		"seed": road_bump_rng.randi(),
+		"light": light_factor
+	})
+	if rain_impacts.size() > 360:
+		rain_impacts.remove_at(0)
+
+func _draw_rain_impacts() -> void:
+	for impact in rain_impacts:
+		var age: float = float(impact["age"])
+		var life: float = max(0.01, float(impact["life"]))
+		var t: float = clamp(age / life, 0.0, 1.0)
+		var world_pos: Vector2 = impact["world_pos"]
+		var screen_pos: Vector2 = _to_screen(world_pos)
+		if not Rect2(Vector2(-24.0, -24.0), size + Vector2(48.0, 48.0)).has_point(screen_pos):
+			continue
+		var light_factor: float = max(float(impact["light"]), _headlight_weather_factor(world_pos))
+		var radius: float = lerp(1.5, float(impact["radius"]), t)
+		var fade: float = pow(1.0 - t, 1.05)
+		var color: Color = Color("#a9bec2").lerp(Color("#d9ffd8"), min(0.85, light_factor))
+		color.a = fade * lerp(0.34, 0.82, light_factor)
+		var seed: int = int(impact["seed"])
+		var start_angle: float = _hash01(seed) * TAU
+		var arc_len: float = lerp(2.4, 5.2, _hash01(seed + 17))
+		draw_circle(screen_pos, max(1.1, radius * 0.18), Color(color.r, color.g, color.b, color.a * 0.22))
+		draw_arc(screen_pos, radius, start_angle, start_angle + arc_len, 18, color, lerp(1.1, 2.3, light_factor), true)
+		for j in range(3):
+			var spoke_angle: float = start_angle + TAU * _hash01(seed + j * 29 + 101)
+			var spoke_dir := Vector2.RIGHT.rotated(spoke_angle)
+			var spoke_len: float = radius * lerp(0.42, 0.86, _hash01(seed + j * 31 + 113))
+			var spoke_color := Color(color.r, color.g, color.b, color.a * 0.48)
+			draw_line(screen_pos + spoke_dir * radius * 0.20, screen_pos + spoke_dir * spoke_len, spoke_color, lerp(0.75, 1.45, light_factor), true)
+		if light_factor > 0.2:
+			var glint_color := Color("#eaffdf", fade * light_factor * 0.62)
+			draw_line(screen_pos + Vector2(-radius * 0.75, 0.0), screen_pos + Vector2(radius * 0.75, 0.0), glint_color, 1.1, true)
 
 func _hash01(value: int) -> float:
 	return fposmod(sin(float(value) * 12.9898) * 43758.5453, 1.0)
