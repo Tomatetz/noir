@@ -91,6 +91,10 @@ func _draw_route_overlay_track(points: Array[Vector2]) -> void:
 	var gap := 10.0
 	var draw_dash := true
 	var remaining := dash
+	var total_len := 0.0
+	for i in range(points.size() - 1):
+		total_len += points[i].distance_to(points[i + 1])
+	var traveled_len := 0.0
 	for i in range(points.size() - 1):
 		var a := points[i]
 		var b := points[i + 1]
@@ -105,13 +109,16 @@ func _draw_route_overlay_track(points: Array[Vector2]) -> void:
 			if draw_dash:
 				var p1: Vector2 = a + direction * cursor
 				var p2: Vector2 = a + direction * (cursor + step)
-				draw_line(p1, p2, Color("#45ff87", 0.18), 4.5, true)
-				draw_line(p1, p2, Color("#baffcb", 0.62), 1.45, true)
+				var progress: float = clamp((traveled_len + cursor + step * 0.5) / max(1.0, total_len), 0.0, 1.0)
+				var alpha_scale: float = lerp(0.30, 1.0, progress)
+				draw_line(p1, p2, Color("#45ff87", 0.18 * alpha_scale), 4.5, true)
+				draw_line(p1, p2, Color("#baffcb", 0.62 * alpha_scale), 1.45, true)
 			cursor += step
 			remaining -= step
 			if remaining <= 0.01:
 				draw_dash = not draw_dash
 				remaining = dash if draw_dash else gap
+		traveled_len += segment_len
 
 func _draw_destination_overlay() -> void:
 	if not map.game.is_traveling:

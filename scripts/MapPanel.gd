@@ -2577,6 +2577,10 @@ func _draw_single_dashed_track(points: Array[Vector2]) -> void:
 	var gap := 11.0
 	var draw_dash := true
 	var remaining := dash
+	var total_len := 0.0
+	for i in range(points.size() - 1):
+		total_len += points[i].distance_to(points[i + 1])
+	var traveled_len := 0.0
 	for i in range(points.size() - 1):
 		var a := points[i]
 		var b := points[i + 1]
@@ -2590,10 +2594,12 @@ func _draw_single_dashed_track(points: Array[Vector2]) -> void:
 			var step = min(remaining, segment_len - cursor)
 			if draw_dash:
 				var dash_points := PackedVector2Array([a + direction * cursor, a + direction * (cursor + step)])
+				var progress: float = clamp((traveled_len + cursor + step * 0.5) / max(1.0, total_len), 0.0, 1.0)
+				var alpha_scale: float = lerp(0.30, 1.0, progress)
 				var glow := Line2D.new()
 				glow.points = dash_points
 				glow.width = 4.0
-				glow.default_color = Color("#52ff8a", 0.16)
+				glow.default_color = Color("#52ff8a", 0.16 * alpha_scale)
 				glow.antialiased = true
 				var glow_material := CanvasItemMaterial.new()
 				glow_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
@@ -2603,7 +2609,7 @@ func _draw_single_dashed_track(points: Array[Vector2]) -> void:
 				var line := Line2D.new()
 				line.points = dash_points
 				line.width = 1.35
-				line.default_color = Color("#9dffba", 0.58)
+				line.default_color = Color("#9dffba", 0.58 * alpha_scale)
 				line.antialiased = true
 				var line_material := CanvasItemMaterial.new()
 				line_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
@@ -2614,6 +2620,7 @@ func _draw_single_dashed_track(points: Array[Vector2]) -> void:
 			if remaining <= 0.01:
 				draw_dash = not draw_dash
 				remaining = dash if draw_dash else gap
+		traveled_len += segment_len
 
 func _draw_vehicle_lights(pos: Vector2, angle: float) -> void:
 	var forward := Vector2.RIGHT.rotated(angle)
