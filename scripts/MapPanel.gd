@@ -49,9 +49,19 @@ var pirate_laser_root: Node2D
 var pirate_laser_outer_glow: Line2D
 var pirate_laser_glow: Line2D
 var pirate_laser_inner_glow: Line2D
+var pirate_laser_trace_line: Line2D
 var pirate_laser_line: Line2D
 var pirate_laser_light: PointLight2D
 var pirate_laser_lights: Array[PointLight2D] = []
+var player_laser_root: Node2D
+var player_laser_outer_glow: Line2D
+var player_laser_glow: Line2D
+var player_laser_inner_glow: Line2D
+var player_laser_trace_line: Line2D
+var player_laser_line: Line2D
+var player_laser_light: PointLight2D
+var player_laser_lights: Array[PointLight2D] = []
+var impact_spark_root: Node2D
 var world_root: Node2D
 var heat_root: Node2D
 var routes_root: Node2D
@@ -96,6 +106,7 @@ var rain_splash_textures: Array[Texture2D] = []
 var wheel_spray_accumulator := 0.0
 var pirate_wheel_spray_accumulator := 0.0
 var wheel_sprays: Array[Dictionary] = []
+var overlay_layer: CanvasLayer
 var overlay: Control
 
 var game: Control
@@ -134,9 +145,29 @@ var pirate_fire_phase := 0.0
 var pirate_fire_duration := 0.0
 var pirate_laser_start := Vector2.ZERO
 var pirate_laser_end := Vector2.ZERO
+var pirate_laser_points: Array[Vector2] = []
+var pirate_laser_color := Color("#ff3030")
 var pirate_hull := 100
 var pirate_laser_blur := 1.0
+var pirate_laser_curve_seed := 0.0
+var pirate_laser_curve_strength := 0.0
 var pirate_laser_damage_applied := false
+var player_weapon_cooldown := 0.0
+var player_weapon_rate := 1.45
+var player_weapon_damage_min := 5
+var player_weapon_damage_max := 9
+var player_weapon_range := 540.0
+var player_fire_phase := 0.0
+var player_fire_duration := 0.0
+var player_laser_start := Vector2.ZERO
+var player_laser_end := Vector2.ZERO
+var player_laser_points: Array[Vector2] = []
+var player_laser_color := Color("#52f6ff")
+var player_laser_blur := 1.0
+var player_laser_curve_seed := 0.0
+var player_laser_curve_strength := 0.0
+var player_laser_damage_applied := false
+var impact_sparks: Array[Dictionary] = []
 var damage_popups: Array[Dictionary] = []
 
 func bind(game_ref: Control) -> void:
@@ -333,13 +364,22 @@ func _setup_canvas_modulate() -> void:
 func _setup_overlay() -> void:
 	if overlay != null:
 		return
+	overlay_layer = CanvasLayer.new()
+	overlay_layer.layer = 20
+	add_child(overlay_layer)
 	overlay = Control.new()
-	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	overlay.z_index = 60
-	add_child(overlay)
+	overlay_layer.add_child(overlay)
 	overlay.set_script(preload("res://scripts/MapOverlay.gd"))
 	overlay.call("bind", self)
+	_sync_overlay_bounds()
+
+func _sync_overlay_bounds() -> void:
+	if overlay == null:
+		return
+	overlay.position = get_global_rect().position
+	overlay.size = size
 
 func _rebuild_world_nodes() -> void:
 	if game == null or heat_root == null:
@@ -551,6 +591,11 @@ func _setup_vehicle_node() -> void:
 func _setup_pirate_node() -> void:
 	if pirate_root != null:
 		return
+	impact_spark_root = Node2D.new()
+	impact_spark_root.z_index = 54
+	impact_spark_root.z_as_relative = false
+	add_child(impact_spark_root)
+
 	pirate_laser_root = Node2D.new()
 	pirate_laser_root.z_index = 53
 	pirate_laser_root.z_as_relative = false
@@ -584,6 +629,15 @@ func _setup_pirate_node() -> void:
 	pirate_laser_inner_glow.material = laser_inner_material
 	pirate_laser_root.add_child(pirate_laser_inner_glow)
 
+	pirate_laser_trace_line = Line2D.new()
+	pirate_laser_trace_line.width = 1.1
+	pirate_laser_trace_line.default_color = Color("#ffdede", 0.0)
+	pirate_laser_trace_line.antialiased = true
+	var laser_trace_material := CanvasItemMaterial.new()
+	laser_trace_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	pirate_laser_trace_line.material = laser_trace_material
+	pirate_laser_root.add_child(pirate_laser_trace_line)
+
 	pirate_laser_line = Line2D.new()
 	pirate_laser_line.width = 2.2
 	pirate_laser_line.default_color = Color("#ff5b5b", 0.92)
@@ -607,6 +661,38 @@ func _setup_pirate_node() -> void:
 		laser_light.texture_scale = 1.45
 		pirate_laser_root.add_child(laser_light)
 		pirate_laser_lights.append(laser_light)
+
+	player_laser_root = Node2D.new()
+	player_laser_root.z_index = 53
+	player_laser_root.z_as_relative = false
+	player_laser_root.visible = false
+	add_child(player_laser_root)
+
+	player_laser_outer_glow = _make_laser_line(34.0, Color("#20e8ff", 0.08))
+	player_laser_root.add_child(player_laser_outer_glow)
+	player_laser_glow = _make_laser_line(18.0, Color("#36f5ff", 0.24))
+	player_laser_root.add_child(player_laser_glow)
+	player_laser_inner_glow = _make_laser_line(8.0, Color("#75fbff", 0.34))
+	player_laser_root.add_child(player_laser_inner_glow)
+	player_laser_trace_line = _make_laser_line(1.1, Color("#e8ffff", 0.0))
+	player_laser_root.add_child(player_laser_trace_line)
+	player_laser_line = _make_laser_line(2.2, Color("#adffff", 0.92))
+	player_laser_root.add_child(player_laser_line)
+
+	player_laser_light = PointLight2D.new()
+	player_laser_light.texture = _make_radial_light_texture(Color.WHITE)
+	player_laser_light.color = player_laser_color
+	player_laser_light.energy = 0.0
+	player_laser_light.texture_scale = 2.6
+	player_laser_root.add_child(player_laser_light)
+	for i in range(5):
+		var player_light := PointLight2D.new()
+		player_light.texture = _make_radial_light_texture(Color.WHITE)
+		player_light.color = player_laser_color
+		player_light.energy = 0.0
+		player_light.texture_scale = 1.45
+		player_laser_root.add_child(player_light)
+		player_laser_lights.append(player_light)
 
 	pirate_root = Node2D.new()
 	pirate_root.z_index = 11
@@ -660,6 +746,19 @@ func _setup_pirate_node() -> void:
 	pirate_rear_right_light.color = Color("#ff3030")
 	pirate_rear_right_light.texture_scale = 0.18
 	pirate_root.add_child(pirate_rear_right_light)
+
+func _make_laser_line(width: float, color: Color) -> Line2D:
+	var line := Line2D.new()
+	line.width = width
+	line.default_color = color
+	line.antialiased = true
+	line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	line.joint_mode = Line2D.LINE_JOINT_ROUND
+	var material := CanvasItemMaterial.new()
+	material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	line.material = material
+	return line
 
 func _setup_destination_marker_node() -> void:
 	if destination_marker_root != null:
@@ -876,6 +975,7 @@ func _make_cone_light_texture() -> Texture2D:
 func _process(delta: float) -> void:
 	if game == null:
 		return
+	_sync_overlay_bounds()
 	if not centered_initially and size.x > 0.0 and size.y > 0.0:
 		centered_initially = true
 		_center_on(game.player_pos)
@@ -888,6 +988,9 @@ func _process(delta: float) -> void:
 		return
 	_update_pirate(delta)
 	_update_damage_popups(delta)
+	_update_impact_sparks(delta)
+	_update_player_weapon(delta)
+	_update_player_laser(delta)
 	_update_rain_impacts(delta)
 	_update_wheel_sprays(delta)
 	_update_shadow_sweep(delta)
@@ -1406,11 +1509,25 @@ func _spawn_pirate() -> void:
 	pirate_pos.y = clamp(pirate_pos.y, 0.0, WORLD_SIZE.y)
 	pirate_angle = player_forward.angle()
 	pirate_speed = road_bump_rng.randf_range(145.0, 190.0)
+	pirate_hull = 100
+	pirate_laser_color = _random_laser_color()
 	pirate_fire_timer = road_bump_rng.randf_range(1.2, 3.0)
 	pirate_fire_phase = 0.0
+	player_weapon_cooldown = road_bump_rng.randf_range(0.35, 0.95)
 	pirate_active = true
 	pirate_root.visible = true
 	_update_pirate_node()
+
+func _random_laser_color() -> Color:
+	var colors := [
+		Color("#ff4040"),
+		Color("#ff7a2f"),
+		Color("#ff3fb4"),
+		Color("#8f5cff"),
+		Color("#42e8ff"),
+		Color("#a4ff4a")
+	]
+	return colors[road_bump_rng.randi_range(0, colors.size() - 1)]
 
 func _update_pirate_motion(delta: float) -> void:
 	var to_player: Vector2 = game.player_pos - pirate_pos
@@ -1446,57 +1563,280 @@ func _update_pirate_laser(delta: float) -> void:
 			pirate_fire_duration = road_bump_rng.randf_range(0.14, 0.28)
 			pirate_fire_phase = pirate_fire_duration
 			pirate_laser_blur = road_bump_rng.randf_range(0.72, 1.45)
+			pirate_laser_curve_seed = road_bump_rng.randf_range(0.0, TAU)
+			pirate_laser_curve_strength = road_bump_rng.randf_range(12.0, 38.0)
 			pirate_laser_damage_applied = false
 			pirate_fire_timer = road_bump_rng.randf_range(2.3, 5.2)
 	var firing: bool = pirate_fire_phase > 0.0
 	pirate_laser_root.visible = firing
 	if not firing:
 		pirate_laser_damage_applied = false
+		pirate_laser_points.clear()
 		pirate_laser_light.energy = 0.0
 		for laser_light in pirate_laser_lights:
 			laser_light.energy = 0.0
 		return
 	if not pirate_laser_damage_applied:
 		var damage_amount: int = road_bump_rng.randi_range(7, 12)
-		var damage_pos: Vector2 = game.player_pos
+		var hit_dir: Vector2 = (pirate_pos - game.player_pos).normalized() if pirate_pos.distance_to(game.player_pos) > 1.0 else Vector2.RIGHT.rotated(game.vehicle_angle)
+		var damage_pos: Vector2 = game.player_pos + hit_dir * 22.0
 		game.hull = clampi(game.hull - damage_amount, 0, 100)
 		pirate_laser_damage_applied = true
 		game._refresh()
 		_update_health_bar_node(_to_screen(game.player_pos))
 		_spawn_damage_popup(damage_amount, damage_pos, clamp(float(game.hull) / 100.0, 0.0, 1.0))
+		_spawn_impact_sparks(damage_pos, pirate_laser_color, 18)
 	var to_player: Vector2 = game.player_pos - pirate_pos
 	var cannon_forward: Vector2 = to_player.normalized() if to_player.length() > 0.01 else Vector2.RIGHT.rotated(pirate_angle)
 	pirate_laser_start = pirate_pos + cannon_forward * 28.0
 	pirate_laser_end = game.player_pos
-	var laser_alpha: float = sin((1.0 - pirate_fire_phase / max(0.01, pirate_fire_duration)) * PI)
-	var jitter: Vector2 = cannon_forward.orthogonal() * sin(Time.get_ticks_msec() * 0.031) * 3.5 * pirate_laser_blur
-	var start_screen: Vector2 = _to_screen(pirate_laser_start)
-	var end_screen: Vector2 = _to_screen(pirate_laser_end)
-	pirate_laser_outer_glow.width = 26.0 * pirate_laser_blur
-	pirate_laser_outer_glow.default_color = Color("#ff2020", 0.08 + laser_alpha * 0.10)
-	pirate_laser_glow.width = 15.0 * pirate_laser_blur
-	pirate_laser_glow.default_color = Color("#ff2424", 0.18 + laser_alpha * 0.28)
+	pirate_laser_points = _make_laser_curve_points(pirate_laser_start, pirate_laser_end, pirate_laser_curve_strength, pirate_laser_curve_seed)
+	var fire_progress: float = 1.0 - pirate_fire_phase / max(0.01, pirate_fire_duration)
+	var trace_alpha: float = clamp(1.0 - fire_progress / 0.34, 0.0, 1.0)
+	var curve_alpha: float = sin(clamp((fire_progress - 0.10) / 0.90, 0.0, 1.0) * PI)
+	var screen_points: PackedVector2Array = _laser_world_points_to_screen(pirate_laser_points)
+	var jitter: Vector2 = cannon_forward.orthogonal() * sin(Time.get_ticks_msec() * 0.041 + pirate_laser_curve_seed) * 2.2 * pirate_laser_blur
+	var outer_points: PackedVector2Array = _offset_laser_points(screen_points, jitter)
+	var glow_points: PackedVector2Array = _offset_laser_points(screen_points, -jitter * 0.45)
+	var inner_points: PackedVector2Array = _offset_laser_points(screen_points, jitter * 0.20)
+	var trace_points := PackedVector2Array([_to_screen(pirate_laser_start), _to_screen(pirate_laser_end)])
+	var laser_core: Color = pirate_laser_color.lightened(0.25)
+	var laser_glow: Color = pirate_laser_color
+	pirate_laser_outer_glow.width = 34.0 * pirate_laser_blur
+	pirate_laser_outer_glow.default_color = _color_with_alpha(laser_glow, 0.025 + curve_alpha * 0.070)
+	pirate_laser_glow.width = 18.0 * pirate_laser_blur
+	pirate_laser_glow.default_color = _color_with_alpha(laser_glow.lightened(0.08), 0.060 + curve_alpha * 0.220)
 	pirate_laser_inner_glow.width = 7.0 * pirate_laser_blur
-	pirate_laser_inner_glow.default_color = Color("#ff4545", 0.28 + laser_alpha * 0.24)
-	pirate_laser_line.default_color = Color("#ff6868", 0.76 + laser_alpha * 0.24)
-	pirate_laser_outer_glow.points = PackedVector2Array([start_screen - jitter, end_screen + jitter])
-	pirate_laser_glow.points = PackedVector2Array([start_screen + jitter * 0.45, end_screen - jitter * 0.45])
-	pirate_laser_inner_glow.points = PackedVector2Array([start_screen - jitter * 0.2, end_screen + jitter * 0.2])
-	pirate_laser_line.points = PackedVector2Array([start_screen, end_screen])
-	pirate_laser_light.position = (start_screen + end_screen) * 0.5
-	pirate_laser_light.energy = 3.2 + laser_alpha * 2.2
-	pirate_laser_light.texture_scale = 3.8 + laser_alpha * 1.4
+	pirate_laser_inner_glow.default_color = _color_with_alpha(laser_core, 0.14 + curve_alpha * 0.36)
+	pirate_laser_trace_line.width = lerp(0.75, 1.35, trace_alpha)
+	pirate_laser_trace_line.default_color = _color_with_alpha(laser_core.lightened(0.35), trace_alpha * 0.95)
+	pirate_laser_line.default_color = _color_with_alpha(laser_core.lightened(0.18), curve_alpha * 0.96)
+	pirate_laser_outer_glow.points = outer_points
+	pirate_laser_glow.points = glow_points
+	pirate_laser_inner_glow.points = inner_points
+	pirate_laser_trace_line.points = trace_points
+	pirate_laser_line.points = screen_points
+	pirate_laser_light.color = pirate_laser_color
+	pirate_laser_light.position = _to_screen(_sample_laser_curve(0.5))
+	pirate_laser_light.energy = 2.6 + max(trace_alpha, curve_alpha) * 3.8
+	pirate_laser_light.texture_scale = 3.5 + max(trace_alpha, curve_alpha) * 1.7
 	for i in range(pirate_laser_lights.size()):
 		var laser_light: PointLight2D = pirate_laser_lights[i]
 		var t: float = float(i + 1) / float(pirate_laser_lights.size() + 1)
-		laser_light.position = _to_screen(pirate_laser_start.lerp(pirate_laser_end, t))
-		laser_light.energy = 1.6 + laser_alpha * 1.4
-		laser_light.texture_scale = 1.75 + laser_alpha * 0.65
+		laser_light.color = pirate_laser_color
+		laser_light.position = _to_screen(_sample_laser_curve(t))
+		laser_light.energy = 1.0 + curve_alpha * 2.2
+		laser_light.texture_scale = 1.55 + curve_alpha * 0.85
+
+func _update_player_weapon(delta: float) -> void:
+	if not pirate_active or pirate_root == null or not pirate_root.visible:
+		player_weapon_cooldown = 0.0
+		return
+	if player_fire_phase > 0.0:
+		return
+	player_weapon_cooldown -= delta
+	if player_weapon_cooldown <= 0.0:
+		_start_player_weapon_fire()
+		player_weapon_cooldown = player_weapon_rate + road_bump_rng.randf_range(-0.22, 0.38)
+
+func _start_player_weapon_fire() -> void:
+	if not pirate_active or player_laser_root == null:
+		return
+	player_fire_duration = road_bump_rng.randf_range(0.16, 0.30)
+	player_fire_phase = player_fire_duration
+	player_laser_blur = road_bump_rng.randf_range(0.66, 1.18)
+	player_laser_curve_seed = road_bump_rng.randf_range(0.0, TAU)
+	player_laser_curve_strength = road_bump_rng.randf_range(8.0, 26.0)
+	player_laser_damage_applied = false
+	player_laser_color = Color("#52f6ff").lerp(Color("#91ffcf"), road_bump_rng.randf_range(0.0, 0.45))
+
+func _update_player_laser(delta: float) -> void:
+	if player_laser_root == null:
+		return
+	if player_fire_phase > 0.0:
+		player_fire_phase = max(0.0, player_fire_phase - delta)
+	var firing: bool = player_fire_phase > 0.0 and pirate_active and pirate_root != null and pirate_root.visible
+	player_laser_root.visible = firing
+	if not firing:
+		player_laser_damage_applied = false
+		player_laser_points.clear()
+		player_laser_light.energy = 0.0
+		for laser_light in player_laser_lights:
+			laser_light.energy = 0.0
+		return
+	var to_pirate: Vector2 = pirate_pos - game.player_pos
+	var shot_forward: Vector2 = to_pirate.normalized() if to_pirate.length() > 0.01 else Vector2.RIGHT.rotated(game.vehicle_angle)
+	player_laser_start = game.player_pos + shot_forward * 30.0
+	player_laser_end = pirate_pos
+	player_laser_points = _make_laser_curve_points(player_laser_start, player_laser_end, player_laser_curve_strength, player_laser_curve_seed)
+	if not player_laser_damage_applied:
+		var damage_amount: int = road_bump_rng.randi_range(player_weapon_damage_min, player_weapon_damage_max)
+		pirate_hull = clampi(pirate_hull - damage_amount, 0, 100)
+		player_laser_damage_applied = true
+		_spawn_damage_popup(damage_amount, pirate_pos, clamp(float(pirate_hull) / 100.0, 0.0, 1.0))
+		_spawn_impact_sparks(pirate_pos, player_laser_color, 14)
+		if pirate_hull <= 0:
+			_despawn_pirate()
+			return
+	var fire_progress: float = 1.0 - player_fire_phase / max(0.01, player_fire_duration)
+	var trace_alpha: float = clamp(1.0 - fire_progress / 0.34, 0.0, 1.0)
+	var curve_alpha: float = sin(clamp((fire_progress - 0.10) / 0.90, 0.0, 1.0) * PI)
+	var screen_points: PackedVector2Array = _laser_world_points_to_screen(player_laser_points)
+	var jitter: Vector2 = shot_forward.orthogonal() * sin(Time.get_ticks_msec() * 0.043 + player_laser_curve_seed) * 1.8 * player_laser_blur
+	var laser_core: Color = player_laser_color.lightened(0.25)
+	var laser_glow: Color = player_laser_color
+	player_laser_outer_glow.width = 32.0 * player_laser_blur
+	player_laser_outer_glow.default_color = _color_with_alpha(laser_glow, 0.020 + curve_alpha * 0.060)
+	player_laser_glow.width = 17.0 * player_laser_blur
+	player_laser_glow.default_color = _color_with_alpha(laser_glow.lightened(0.08), 0.055 + curve_alpha * 0.190)
+	player_laser_inner_glow.width = 6.2 * player_laser_blur
+	player_laser_inner_glow.default_color = _color_with_alpha(laser_core, 0.13 + curve_alpha * 0.30)
+	player_laser_trace_line.width = lerp(0.65, 1.10, trace_alpha)
+	player_laser_trace_line.default_color = _color_with_alpha(laser_core.lightened(0.35), trace_alpha * 0.88)
+	player_laser_line.default_color = _color_with_alpha(laser_core.lightened(0.18), curve_alpha * 0.90)
+	player_laser_outer_glow.points = _offset_laser_points(screen_points, jitter)
+	player_laser_glow.points = _offset_laser_points(screen_points, -jitter * 0.45)
+	player_laser_inner_glow.points = _offset_laser_points(screen_points, jitter * 0.20)
+	player_laser_trace_line.points = PackedVector2Array([_to_screen(player_laser_start), _to_screen(player_laser_end)])
+	player_laser_line.points = screen_points
+	player_laser_light.color = player_laser_color
+	player_laser_light.position = _to_screen(_sample_points_curve(player_laser_points, player_laser_start, player_laser_end, 0.5))
+	player_laser_light.energy = 2.0 + max(trace_alpha, curve_alpha) * 2.8
+	player_laser_light.texture_scale = 3.0 + max(trace_alpha, curve_alpha) * 1.2
+	for i in range(player_laser_lights.size()):
+		var laser_light: PointLight2D = player_laser_lights[i]
+		var t: float = float(i + 1) / float(player_laser_lights.size() + 1)
+		laser_light.color = player_laser_color
+		laser_light.position = _to_screen(_sample_points_curve(player_laser_points, player_laser_start, player_laser_end, t))
+		laser_light.energy = 0.9 + curve_alpha * 1.7
+		laser_light.texture_scale = 1.35 + curve_alpha * 0.65
+
+func _spawn_impact_sparks(world_pos: Vector2, color: Color, count: int) -> void:
+	if impact_spark_root == null:
+		return
+	for i in range(count):
+		var line := _make_laser_line(road_bump_rng.randf_range(0.55, 1.45), _color_with_alpha(color.lightened(0.25), 0.0))
+		impact_spark_root.add_child(line)
+		var angle: float = road_bump_rng.randf_range(0.0, TAU)
+		var speed: float = road_bump_rng.randf_range(70.0, 220.0)
+		var spark := {
+			"line": line,
+			"world_pos": world_pos,
+			"velocity": Vector2.RIGHT.rotated(angle) * speed,
+			"age": 0.0,
+			"life": road_bump_rng.randf_range(0.18, 0.42),
+			"length": road_bump_rng.randf_range(5.0, 16.0),
+			"width": line.width,
+			"color": color.lightened(road_bump_rng.randf_range(0.05, 0.38))
+		}
+		impact_sparks.append(spark)
+	if impact_sparks.size() > 220:
+		var remove_count: int = impact_sparks.size() - 220
+		for i in range(remove_count):
+			var old_spark: Dictionary = impact_sparks.pop_front()
+			var old_line: Line2D = old_spark["line"] as Line2D
+			if is_instance_valid(old_line):
+				old_line.queue_free()
+
+func _update_impact_sparks(delta: float) -> void:
+	for i in range(impact_sparks.size() - 1, -1, -1):
+		var spark: Dictionary = impact_sparks[i]
+		var line: Line2D = spark["line"] as Line2D
+		var age: float = float(spark["age"]) + delta
+		spark["age"] = age
+		var life: float = max(0.01, float(spark["life"]))
+		if age >= life:
+			if is_instance_valid(line):
+				line.queue_free()
+			impact_sparks.remove_at(i)
+			continue
+		if is_instance_valid(line):
+			var t: float = clamp(age / life, 0.0, 1.0)
+			var origin: Vector2 = spark["world_pos"]
+			var velocity: Vector2 = spark["velocity"]
+			var pos: Vector2 = origin + velocity * age
+			var dir: Vector2 = velocity.normalized() if velocity.length() > 0.01 else Vector2.RIGHT
+			var head: Vector2 = _to_screen(pos)
+			var tail: Vector2 = _to_screen(pos - dir * float(spark["length"]) * lerp(1.0, 0.25, t))
+			line.points = PackedVector2Array([tail, head])
+			line.width = max(0.12, lerp(float(spark["width"]), 0.12, t))
+			var spark_color: Color = spark["color"]
+			line.default_color = _color_with_alpha(spark_color, pow(1.0 - t, 1.35) * 0.92)
+		impact_sparks[i] = spark
+
+func _make_laser_curve_points(start: Vector2, end: Vector2, strength: float, seed: float) -> Array[Vector2]:
+	var control_points: Array[Vector2] = []
+	var segment: Vector2 = end - start
+	var distance: float = segment.length()
+	if distance <= 1.0:
+		control_points.append(start)
+		control_points.append(end)
+		return control_points
+	var normal: Vector2 = segment.normalized().orthogonal()
+	var effective_strength: float = min(strength, distance * 0.16)
+	for i in range(5):
+		var t: float = float(i) / 4.0
+		var envelope: float = sin(t * PI)
+		var wave: float = sin(seed + t * TAU * 1.35) * 0.72 + sin(seed * 1.7 + t * TAU * 2.1) * 0.28
+		var lateral: float = wave * effective_strength * envelope
+		control_points.append(start.lerp(end, t) + normal * lateral)
+	return _smooth_laser_points(control_points, 5)
+
+func _smooth_laser_points(control_points: Array[Vector2], steps_per_segment: int) -> Array[Vector2]:
+	if control_points.size() < 3:
+		return control_points
+	var smoothed: Array[Vector2] = []
+	for i in range(control_points.size() - 1):
+		var p0: Vector2 = control_points[max(i - 1, 0)]
+		var p1: Vector2 = control_points[i]
+		var p2: Vector2 = control_points[i + 1]
+		var p3: Vector2 = control_points[min(i + 2, control_points.size() - 1)]
+		for step in range(steps_per_segment):
+			var t: float = float(step) / float(steps_per_segment)
+			smoothed.append(_catmull_rom(p0, p1, p2, p3, t))
+	smoothed.append(control_points[control_points.size() - 1])
+	return smoothed
+
+func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:
+	var t2: float = t * t
+	var t3: float = t2 * t
+	return (p1 * 2.0 + (p2 - p0) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
+
+func _laser_world_points_to_screen(points: Array[Vector2]) -> PackedVector2Array:
+	var screen_points := PackedVector2Array()
+	for point in points:
+		screen_points.append(_to_screen(point))
+	return screen_points
+
+func _offset_laser_points(points: PackedVector2Array, offset: Vector2) -> PackedVector2Array:
+	var shifted := PackedVector2Array()
+	for point in points:
+		shifted.append(point + offset)
+	return shifted
+
+func _sample_laser_curve(t: float) -> Vector2:
+	return _sample_points_curve(pirate_laser_points, pirate_laser_start, pirate_laser_end, t)
+
+func _sample_points_curve(points: Array[Vector2], start: Vector2, end: Vector2, t: float) -> Vector2:
+	if points.is_empty():
+		return start.lerp(end, t)
+	if points.size() == 1:
+		return points[0]
+	var scaled: float = clamp(t, 0.0, 1.0) * float(points.size() - 1)
+	var index: int = int(floor(scaled))
+	var next_index: int = min(index + 1, points.size() - 1)
+	var local_t: float = scaled - float(index)
+	return points[index].lerp(points[next_index], local_t)
 
 func _despawn_pirate() -> void:
 	pirate_active = false
 	pirate_fire_phase = 0.0
 	pirate_laser_damage_applied = false
+	pirate_laser_points.clear()
+	player_fire_phase = 0.0
+	player_weapon_cooldown = 0.0
+	player_laser_damage_applied = false
+	player_laser_points.clear()
 	pirate_pos = Vector2(-10000.0, -10000.0)
 	if pirate_root != null:
 		pirate_root.visible = false
@@ -1506,6 +1846,12 @@ func _despawn_pirate() -> void:
 	if pirate_laser_light != null:
 		pirate_laser_light.energy = 0.0
 	for laser_light in pirate_laser_lights:
+		laser_light.energy = 0.0
+	if player_laser_root != null:
+		player_laser_root.visible = false
+	if player_laser_light != null:
+		player_laser_light.energy = 0.0
+	for laser_light in player_laser_lights:
 		laser_light.energy = 0.0
 	if pirate_health_bar_root != null:
 		pirate_health_bar_root.visible = false
@@ -1861,7 +2207,7 @@ func _update_cloud_visibility(delta: float) -> void:
 		var target_tint: Color = Color(0.88, 0.96, 0.98, 1.0).lerp(Color(1.0, 0.72, 0.36, 1.0), light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.44, 1.0, 0.66, 1.0), route_light_factor * 0.12)
 		target_tint = target_tint.lerp(Color(0.36, 1.0, 0.56, 1.0), health_light_factor)
-		target_tint = target_tint.lerp(Color(1.0, 0.18, 0.16, 1.0), laser_light_factor)
+		target_tint = target_tint.lerp(_color_with_alpha(_laser_cloud_color(sprite.position).lightened(0.25), 1.0), laser_light_factor)
 		target_tint = target_tint.lerp(Color(0.92, 1.0, 0.86, 1.0), destination_light_factor)
 		var color: Color = sprite.modulate
 		var tint_lerp: float = clamp(delta * 2.4, 0.0, 1.0)
@@ -1953,17 +2299,33 @@ func _destination_cloud_light_factor(world_pos: Vector2) -> float:
 	return pow(raw_light, 1.2)
 
 func _laser_cloud_light_factor(world_pos: Vector2) -> float:
-	if pirate_fire_phase <= 0.0:
+	var pirate_factor: float = _laser_points_cloud_light(pirate_laser_points, pirate_fire_phase, pirate_fire_duration, world_pos)
+	var player_factor: float = _laser_points_cloud_light(player_laser_points, player_fire_phase, player_fire_duration, world_pos)
+	return max(pirate_factor, player_factor)
+
+func _laser_cloud_color(world_pos: Vector2) -> Color:
+	var pirate_factor: float = _laser_points_cloud_light(pirate_laser_points, pirate_fire_phase, pirate_fire_duration, world_pos)
+	var player_factor: float = _laser_points_cloud_light(player_laser_points, player_fire_phase, player_fire_duration, world_pos)
+	return player_laser_color if player_factor > pirate_factor else pirate_laser_color
+
+func _laser_points_cloud_light(points: Array[Vector2], phase: float, duration: float, world_pos: Vector2) -> float:
+	if phase <= 0.0 or points.size() < 2:
 		return 0.0
-	var segment: Vector2 = pirate_laser_end - pirate_laser_start
-	var segment_len_sq: float = segment.length_squared()
-	if segment_len_sq <= 0.01:
+	var best_distance: float = INF
+	for i in range(points.size() - 1):
+		var start: Vector2 = points[i]
+		var end: Vector2 = points[i + 1]
+		var segment: Vector2 = end - start
+		var segment_len_sq: float = segment.length_squared()
+		if segment_len_sq <= 0.01:
+			continue
+		var t: float = clamp((world_pos - start).dot(segment) / segment_len_sq, 0.0, 1.0)
+		var closest: Vector2 = start + segment * t
+		best_distance = min(best_distance, world_pos.distance_to(closest))
+	if best_distance == INF:
 		return 0.0
-	var t: float = clamp((world_pos - pirate_laser_start).dot(segment) / segment_len_sq, 0.0, 1.0)
-	var closest: Vector2 = pirate_laser_start + segment * t
-	var distance: float = world_pos.distance_to(closest)
-	var flash: float = sin((1.0 - pirate_fire_phase / max(0.01, pirate_fire_duration)) * PI)
-	var raw_light: float = clamp(1.0 - distance / 260.0, 0.0, 1.0)
+	var flash: float = sin((1.0 - phase / max(0.01, duration)) * PI)
+	var raw_light: float = clamp(1.0 - best_distance / 280.0, 0.0, 1.0)
 	return pow(raw_light, 1.15) * lerp(0.55, 1.0, flash)
 
 func _update_travel_route() -> void:

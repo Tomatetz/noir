@@ -16,7 +16,9 @@ func _draw() -> void:
 	_draw_rain()
 	_draw_route_overlay()
 	_draw_destination_overlay()
+	_draw_weapon_range_overlay()
 	_draw_hover_card()
+	_draw_weapon_hud()
 	_draw_legend()
 	if not map.fullscreen_view:
 		_draw_minimap()
@@ -146,6 +148,66 @@ func _draw_hover_card() -> void:
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 53), faction.title, HORIZONTAL_ALIGNMENT_LEFT, 240, 12, Color("#b6c2c8"))
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 76), "Вода %d  Еда %d  Заряд %d" % [d.water, d.food, d.power], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 96), "Безопасность %d  Вычисления %d" % [d.security, d.compute], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
+
+func _draw_weapon_hud() -> void:
+	var slot_center := Vector2(36.0, 78.0)
+	var radius := 18.0
+	var slot_rect := Rect2(slot_center - Vector2(radius + 12.0, radius + 12.0), Vector2(radius + 12.0, radius + 12.0) * 2.0)
+	var hovered: bool = slot_rect.has_point(get_local_mouse_position())
+	var weapon_color: Color = map.player_laser_color
+	var ready_ratio: float = 1.0
+	if map.player_weapon_cooldown > 0.0:
+		ready_ratio = clamp(1.0 - map.player_weapon_cooldown / max(0.01, map.player_weapon_rate), 0.0, 1.0)
+	var firing: bool = map.player_fire_phase > 0.0
+	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.018)
+	var glow_alpha: float = 0.08 + pow(ready_ratio, 1.7) * 0.24
+	if firing:
+		glow_alpha += 0.10 + pulse * 0.08
+	if hovered:
+		glow_alpha += 0.08
+	draw_circle(slot_center, radius + 14.0, Color(weapon_color.r, weapon_color.g, weapon_color.b, glow_alpha * 0.38))
+	draw_circle(slot_center, radius + 9.0, Color(weapon_color.r, weapon_color.g, weapon_color.b, glow_alpha))
+	draw_circle(slot_center, radius, Color("#071013", 0.94))
+	draw_circle(slot_center, radius * 0.58, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.24 + ready_ratio * 0.34))
+	draw_arc(slot_center, radius, 0.0, TAU, 42, Color("#d7e3e4", 0.34), 1.4, true)
+	var start_angle: float = -PI * 0.5
+	var end_angle: float = start_angle + TAU * ready_ratio
+	var ring_color: Color = weapon_color.lightened(0.20)
+	var ring_alpha: float = 0.36 + pow(ready_ratio, 1.45) * 0.56
+	draw_arc(slot_center, radius + 5.0, start_angle, end_angle, 48, Color(ring_color.r, ring_color.g, ring_color.b, ring_alpha * 0.28), 7.0, true)
+	draw_arc(slot_center, radius + 2.0, start_angle, end_angle, 48, Color(ring_color.r, ring_color.g, ring_color.b, ring_alpha * 0.46), 4.5, true)
+	draw_arc(slot_center, radius + 1.0, start_angle, end_angle, 48, Color(ring_color.r, ring_color.g, ring_color.b, ring_alpha), 2.5, true)
+	if firing:
+		draw_arc(slot_center, radius + 5.0, start_angle, start_angle + TAU * pulse, 48, Color(ring_color.r, ring_color.g, ring_color.b, 0.24), 2.0, true)
+	draw_line(slot_center + Vector2(-6.0, 4.0), slot_center + Vector2(6.0, -4.0), Color("#f3ffff", 0.82), 1.5, true)
+	draw_line(slot_center + Vector2(-2.0, -8.0), slot_center + Vector2(2.0, 8.0), Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.75), 1.1, true)
+	draw_string(get_theme_default_font(), slot_center + Vector2(28.0, 5.0), "Лазер", HORIZONTAL_ALIGNMENT_LEFT, 90, 11, Color("#cfd8dc", 0.88))
+
+func _draw_weapon_range_overlay() -> void:
+	var slot_center := Vector2(36.0, 78.0)
+	var radius := 30.0
+	if not Rect2(slot_center - Vector2(radius, radius), Vector2(radius, radius) * 2.0).has_point(get_local_mouse_position()):
+		return
+	var center: Vector2 = map._to_screen(map.game.player_pos)
+	var weapon_color: Color = map.player_laser_color
+	var range_radius: float = map.player_weapon_range
+	draw_circle(center, range_radius, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.018))
+	_draw_dashed_circle(center, range_radius, weapon_color)
+
+func _draw_dashed_circle(center: Vector2, radius: float, color: Color) -> void:
+	var segments := 96
+	var dash_segments := 4
+	var gap_segments := 3
+	for i in range(segments):
+		var cycle := dash_segments + gap_segments
+		if i % cycle >= dash_segments:
+			continue
+		var a0: float = TAU * float(i) / float(segments)
+		var a1: float = TAU * float(i + 1) / float(segments)
+		var p0: Vector2 = center + Vector2(cos(a0), sin(a0)) * radius
+		var p1: Vector2 = center + Vector2(cos(a1), sin(a1)) * radius
+		draw_line(p0, p1, Color(color.r, color.g, color.b, 0.18), 5.0, true)
+		draw_line(p0, p1, Color(color.r, color.g, color.b, 0.74), 1.4, true)
 
 func _draw_legend() -> void:
 	var x := 18.0

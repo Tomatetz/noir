@@ -208,12 +208,6 @@ func _build_ui() -> void:
 	top.custom_minimum_size = Vector2(0, 40)
 	frame.add_child(top)
 
-	var title := Label.new()
-	title.text = "ВОДЯНАЯ БИРЖА"
-	title.add_theme_font_size_override("font_size", 20)
-	title.add_theme_color_override("font_color", Color("#e7ecef"))
-	top.add_child(title)
-
 	status_label = Label.new()
 	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
