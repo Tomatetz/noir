@@ -61,6 +61,8 @@ var player_laser_trace_line: Line2D
 var player_laser_line: Line2D
 var player_laser_light: PointLight2D
 var player_laser_lights: Array[PointLight2D] = []
+var weapon_range_light: PointLight2D
+var weapon_range_lights: Array[PointLight2D] = []
 var impact_spark_root: Node2D
 var world_root: Node2D
 var heat_root: Node2D
@@ -210,6 +212,9 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		var local_mouse := get_local_mouse_position()
 		if not Rect2(Vector2.ZERO, size).has_point(local_mouse):
+			return
+		if _is_weapon_hud_zone(local_mouse):
+			get_viewport().set_input_as_handled()
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			_handle_left_click(local_mouse)
@@ -380,6 +385,9 @@ func _sync_overlay_bounds() -> void:
 		return
 	overlay.position = get_global_rect().position
 	overlay.size = size
+	if overlay_layer != null:
+		var active_view := game == null or _is_active_map_view()
+		overlay_layer.visible = is_visible_in_tree() and active_view
 
 func _rebuild_world_nodes() -> void:
 	if game == null or heat_root == null:
@@ -425,6 +433,7 @@ func _rebuild_world_nodes() -> void:
 		var sprite: Sprite2D = null
 		var light_sprite: Sprite2D = null
 		var location_glow: PointLight2D = null
+		var name_glow: PointLight2D = null
 		var marker := Polygon2D.new()
 		var location_texture = location_textures.get(game.districts[i].name)
 		if location_texture != null:
@@ -469,7 +478,15 @@ func _rebuild_world_nodes() -> void:
 		ring.antialiased = true
 		node.add_child(ring)
 
-		district_nodes.append({"root": node, "marker": marker, "ring": ring, "sprite": sprite, "light_sprite": light_sprite, "location_glow": location_glow, "index": i})
+		name_glow = PointLight2D.new()
+		name_glow.texture = _make_radial_light_texture(Color.WHITE)
+		name_glow.color = _location_neon_color(game.districts[i].faction).lightened(0.25)
+		name_glow.energy = 1.35
+		name_glow.texture_scale = 2.85
+		name_glow.position = Vector2(0.0, -98.0 if sprite != null else -38.0)
+		node.add_child(name_glow)
+
+		district_nodes.append({"root": node, "marker": marker, "ring": ring, "sprite": sprite, "light_sprite": light_sprite, "location_glow": location_glow, "name_glow": name_glow, "index": i})
 
 func _make_circle_polygon(radius: float, segments: int) -> PackedVector2Array:
 	var points := PackedVector2Array()
@@ -693,6 +710,21 @@ func _setup_pirate_node() -> void:
 		player_light.texture_scale = 1.45
 		player_laser_root.add_child(player_light)
 		player_laser_lights.append(player_light)
+
+	weapon_range_light = PointLight2D.new()
+	weapon_range_light.texture = _make_radial_light_texture(Color.WHITE)
+	weapon_range_light.color = player_laser_color
+	weapon_range_light.energy = 0.0
+	weapon_range_light.texture_scale = player_weapon_range / 64.0
+	add_child(weapon_range_light)
+	for i in range(18):
+		var range_light := PointLight2D.new()
+		range_light.texture = _make_radial_light_texture(Color.WHITE)
+		range_light.color = player_laser_color
+		range_light.energy = 0.0
+		range_light.texture_scale = 1.7
+		add_child(range_light)
+		weapon_range_lights.append(range_light)
 
 	pirate_root = Node2D.new()
 	pirate_root.z_index = 11
@@ -995,6 +1027,7 @@ func _process(delta: float) -> void:
 	_update_wheel_sprays(delta)
 	_update_shadow_sweep(delta)
 	_update_destination_marker()
+	_update_weapon_range_light()
 	_update_world_nodes(delta)
 	_update_cloud_props(delta)
 	_update_travel_route()
@@ -1007,6 +1040,8 @@ func _process(delta: float) -> void:
 	if Rect2(Vector2.ZERO, size).has_point(local_mouse):
 		hover_screen_pos = local_mouse
 		_update_hover(local_mouse)
+	if _is_weapon_hud_zone(local_mouse):
+		return
 	var edge := 74.0
 	var speed := 620.0
 	var pan := Vector2.ZERO
@@ -1061,6 +1096,11 @@ func _is_active_map_view() -> bool:
 		return game.fullscreen_map_panel != null and game.fullscreen_map_panel.visible
 	return game.fullscreen_map_panel == null or not game.fullscreen_map_panel.visible
 
+func _is_weapon_hud_zone(local_pos: Vector2) -> bool:
+	var slot_center := Vector2(58.0, max(88.0, size.y - 74.0))
+	var rect := Rect2(slot_center - Vector2(48.0, 44.0), Vector2(176.0, 88.0))
+	return rect.has_point(local_pos)
+
 func _center_from_minimap(local_pos: Vector2) -> void:
 	var map_size := minimap_rect.size
 	var scale = min(map_size.x / WORLD_SIZE.x, map_size.y / WORLD_SIZE.y)
@@ -1094,8 +1134,11 @@ func _draw_rain() -> void:
 	if game == null or size.x <= 0.0 or size.y <= 0.0:
 		return
 	var time: float = Time.get_ticks_msec() * 0.001
-	var gust_angle: float = -0.22 + sin(time * 0.17) * 0.05
-	var base_rain_direction := Vector2(gust_angle, 1.0).normalized()
+	var cloud_direction: Vector2 = cloud_wind_velocity.normalized()
+	if cloud_direction.length() <= 0.01:
+		cloud_direction = Vector2.RIGHT
+	var base_rain_direction: Vector2 = (cloud_direction * 0.42 + Vector2.DOWN).normalized()
+	base_rain_direction = base_rain_direction.rotated(sin(time * 0.17) * 0.035)
 	var wrap_size := size + Vector2(260.0, 260.0)
 	for i in range(RAIN_STREAK_COUNT):
 		var h1: float = _hash01(rain_seed + i * 37)
@@ -1108,15 +1151,15 @@ func _draw_rain() -> void:
 		var travel: Vector2 = rain_direction * time * speed
 		var x: float = fposmod(h1 * wrap_size.x + travel.x, wrap_size.x) - 130.0
 		var y: float = fposmod(h2 * wrap_size.y + travel.y, wrap_size.y) - 130.0
-		var start := Vector2(x, y)
+		var head := Vector2(x, y)
 		var length: float = lerp(10.0, 70.0, pow(h5, 1.75))
-		var end := start - rain_direction * length
-		var mid_world: Vector2 = _to_world((start + end) * 0.5)
+		var tail := head - rain_direction * length
+		var mid_world: Vector2 = _to_world((head + tail) * 0.5)
 		var headlight_factor: float = _headlight_weather_factor(mid_world)
 		var alpha: float = lerp(0.045, 0.18, h3) + headlight_factor * lerp(0.20, 0.42, h5)
 		var rain_color: Color = Color("#d8eeee").lerp(Color("#caffd7"), min(0.75, headlight_factor))
 		rain_color.a = min(alpha, 0.68)
-		draw_line(start, end, rain_color, lerp(0.65, 1.45, headlight_factor), true)
+		draw_line(tail, head, rain_color, lerp(0.65, 1.45, headlight_factor), true)
 
 func _update_rain_impacts(delta: float) -> void:
 	if game == null or rain_surface_root == null or size.x <= 0.0 or size.y <= 0.0:
@@ -1398,13 +1441,7 @@ func _headlight_weather_factor(world_pos: Vector2) -> float:
 	return pow(cone, 1.15) * pow(distance_fade, 0.55)
 
 func _draw_node_labels() -> void:
-	for i in range(game.districts.size()):
-		var d = game.districts[i]
-		var pos = _to_screen(d.pos)
-		var label_pos = pos + Vector2(26, -9)
-		draw_string(get_theme_default_font(), label_pos, d.name, HORIZONTAL_ALIGNMENT_LEFT, 210, 13, Color("#e7ecef"))
-		var stats = "W%d E%d S%d" % [d.water, d.power, d.security]
-		draw_string(get_theme_default_font(), label_pos + Vector2(0, 17), stats, HORIZONTAL_ALIGNMENT_LEFT, 150, 11, Color("#aebbc2"))
+	pass
 
 func _draw_vehicle() -> void:
 	var pos: Vector2 = _to_screen(game.player_pos)
@@ -1585,7 +1622,7 @@ func _update_pirate_laser(delta: float) -> void:
 		game._refresh()
 		_update_health_bar_node(_to_screen(game.player_pos))
 		_spawn_damage_popup(damage_amount, damage_pos, clamp(float(game.hull) / 100.0, 0.0, 1.0))
-		_spawn_impact_sparks(damage_pos, pirate_laser_color, 18)
+		_spawn_impact_sparks(damage_pos, pirate_laser_color, 28)
 	var to_player: Vector2 = game.player_pos - pirate_pos
 	var cannon_forward: Vector2 = to_player.normalized() if to_player.length() > 0.01 else Vector2.RIGHT.rotated(pirate_angle)
 	pirate_laser_start = pirate_pos + cannon_forward * 28.0
@@ -1650,6 +1687,24 @@ func _start_player_weapon_fire() -> void:
 	player_laser_damage_applied = false
 	player_laser_color = Color("#52f6ff").lerp(Color("#91ffcf"), road_bump_rng.randf_range(0.0, 0.45))
 
+func _update_weapon_range_light() -> void:
+	if weapon_range_light == null or game == null:
+		return
+	var hovered: bool = _is_weapon_hud_zone(get_local_mouse_position())
+	weapon_range_light.position = _to_screen(game.player_pos)
+	weapon_range_light.color = player_laser_color
+	weapon_range_light.texture_scale = player_weapon_range / 64.0
+	var target_energy: float = 0.08 if hovered else 0.0
+	weapon_range_light.energy = lerp(weapon_range_light.energy, target_energy, 0.18)
+	var spin: float = Time.get_ticks_msec() * 0.00018
+	for i in range(weapon_range_lights.size()):
+		var range_light: PointLight2D = weapon_range_lights[i]
+		var angle: float = spin + TAU * float(i) / float(weapon_range_lights.size())
+		range_light.position = _to_screen(game.player_pos + Vector2(cos(angle), sin(angle)) * player_weapon_range)
+		range_light.color = player_laser_color
+		range_light.texture_scale = 1.45
+		range_light.energy = lerp(range_light.energy, 0.44 if hovered else 0.0, 0.18)
+
 func _update_player_laser(delta: float) -> void:
 	if player_laser_root == null:
 		return
@@ -1674,8 +1729,9 @@ func _update_player_laser(delta: float) -> void:
 		pirate_hull = clampi(pirate_hull - damage_amount, 0, 100)
 		player_laser_damage_applied = true
 		_spawn_damage_popup(damage_amount, pirate_pos, clamp(float(pirate_hull) / 100.0, 0.0, 1.0))
-		_spawn_impact_sparks(pirate_pos, player_laser_color, 14)
+		_spawn_impact_sparks(pirate_pos, player_laser_color, 24)
 		if pirate_hull <= 0:
+			_spawn_vehicle_explosion(pirate_pos)
 			_despawn_pirate()
 			return
 	var fire_progress: float = 1.0 - player_fire_phase / max(0.01, player_fire_duration)
@@ -1714,29 +1770,97 @@ func _update_player_laser(delta: float) -> void:
 func _spawn_impact_sparks(world_pos: Vector2, color: Color, count: int) -> void:
 	if impact_spark_root == null:
 		return
-	for i in range(count):
-		var line := _make_laser_line(road_bump_rng.randf_range(0.55, 1.45), _color_with_alpha(color.lightened(0.25), 0.0))
+	var burst_count: int = count + road_bump_rng.randi_range(6, 12)
+	for i in range(burst_count):
+		var hot_core: bool = i < 5
+		var line := _make_laser_line(
+			road_bump_rng.randf_range(1.05, 2.65) if hot_core else road_bump_rng.randf_range(0.70, 1.85),
+			_color_with_alpha(color.lightened(0.45), 0.0)
+		)
 		impact_spark_root.add_child(line)
 		var angle: float = road_bump_rng.randf_range(0.0, TAU)
-		var speed: float = road_bump_rng.randf_range(70.0, 220.0)
+		var speed: float = road_bump_rng.randf_range(165.0, 420.0) if hot_core else road_bump_rng.randf_range(95.0, 310.0)
 		var spark := {
 			"line": line,
 			"world_pos": world_pos,
 			"velocity": Vector2.RIGHT.rotated(angle) * speed,
 			"age": 0.0,
-			"life": road_bump_rng.randf_range(0.18, 0.42),
-			"length": road_bump_rng.randf_range(5.0, 16.0),
+			"life": road_bump_rng.randf_range(0.24, 0.56),
+			"length": road_bump_rng.randf_range(11.0, 28.0) if hot_core else road_bump_rng.randf_range(7.0, 22.0),
 			"width": line.width,
-			"color": color.lightened(road_bump_rng.randf_range(0.05, 0.38))
+			"color": color.lightened(road_bump_rng.randf_range(0.24, 0.62)),
+			"flash": hot_core
 		}
 		impact_sparks.append(spark)
-	if impact_sparks.size() > 220:
-		var remove_count: int = impact_sparks.size() - 220
+	if impact_sparks.size() > 320:
+		var remove_count: int = impact_sparks.size() - 320
 		for i in range(remove_count):
 			var old_spark: Dictionary = impact_sparks.pop_front()
 			var old_line: Line2D = old_spark["line"] as Line2D
 			if is_instance_valid(old_line):
 				old_line.queue_free()
+
+func _spawn_vehicle_explosion(world_pos: Vector2) -> void:
+	if impact_spark_root == null:
+		return
+	var palette := [
+		Color("#fff7d1"),
+		Color("#ffdd76"),
+		Color("#ff8f38"),
+		Color("#ff4a2d"),
+		Color("#9dfff1")
+	]
+	for ring in range(3):
+		var count: int = 34 + ring * 18
+		for i in range(count):
+			var hot_core: bool = ring == 0
+			var color: Color = palette[road_bump_rng.randi_range(0, palette.size() - 1)]
+			var line := _make_laser_line(
+				road_bump_rng.randf_range(1.6, 4.2) if hot_core else road_bump_rng.randf_range(0.8, 2.4),
+				_color_with_alpha(color, 0.0)
+			)
+			impact_spark_root.add_child(line)
+			var angle: float = TAU * float(i) / float(count) + road_bump_rng.randf_range(-0.18, 0.18)
+			var speed: float = road_bump_rng.randf_range(260.0, 620.0) if hot_core else road_bump_rng.randf_range(150.0, 480.0)
+			var offset: Vector2 = Vector2.RIGHT.rotated(angle) * road_bump_rng.randf_range(0.0, 14.0 + ring * 9.0)
+			impact_sparks.append({
+				"line": line,
+				"world_pos": world_pos + offset,
+				"velocity": Vector2.RIGHT.rotated(angle) * speed,
+				"age": road_bump_rng.randf_range(0.0, 0.05 * ring),
+				"life": road_bump_rng.randf_range(0.42, 0.96),
+				"length": road_bump_rng.randf_range(18.0, 46.0) if hot_core else road_bump_rng.randf_range(10.0, 34.0),
+				"width": line.width,
+				"color": color.lightened(road_bump_rng.randf_range(0.12, 0.45)),
+				"flash": hot_core
+			})
+	for i in range(10):
+		var color := Color("#fff2b4").lerp(Color("#ff5a35"), road_bump_rng.randf_range(0.0, 1.0))
+		var line := _make_laser_line(road_bump_rng.randf_range(3.2, 6.5), _color_with_alpha(color, 0.0))
+		impact_spark_root.add_child(line)
+		var angle: float = road_bump_rng.randf_range(0.0, TAU)
+		impact_sparks.append({
+			"line": line,
+			"world_pos": world_pos,
+			"velocity": Vector2.RIGHT.rotated(angle) * road_bump_rng.randf_range(35.0, 95.0),
+			"age": 0.0,
+			"life": road_bump_rng.randf_range(0.18, 0.34),
+			"length": road_bump_rng.randf_range(26.0, 58.0),
+			"width": line.width,
+			"color": color.lightened(0.55),
+			"flash": true
+		})
+	_trim_impact_sparks(520)
+
+func _trim_impact_sparks(limit: int) -> void:
+	if impact_sparks.size() <= limit:
+		return
+	var remove_count: int = impact_sparks.size() - limit
+	for i in range(remove_count):
+		var old_spark: Dictionary = impact_sparks.pop_front()
+		var old_line: Line2D = old_spark["line"] as Line2D
+		if is_instance_valid(old_line):
+			old_line.queue_free()
 
 func _update_impact_sparks(delta: float) -> void:
 	for i in range(impact_sparks.size() - 1, -1, -1):
@@ -1761,7 +1885,8 @@ func _update_impact_sparks(delta: float) -> void:
 			line.points = PackedVector2Array([tail, head])
 			line.width = max(0.12, lerp(float(spark["width"]), 0.12, t))
 			var spark_color: Color = spark["color"]
-			line.default_color = _color_with_alpha(spark_color, pow(1.0 - t, 1.35) * 0.92)
+			var flash_boost: float = 1.22 if bool(spark.get("flash", false)) else 1.0
+			line.default_color = _color_with_alpha(spark_color, min(1.0, pow(1.0 - t, 1.18) * flash_boost))
 		impact_sparks[i] = spark
 
 func _make_laser_curve_points(start: Vector2, end: Vector2, strength: float, seed: float) -> Array[Vector2]:
@@ -2107,6 +2232,7 @@ func _update_world_nodes(delta: float) -> void:
 		var sprite: Sprite2D = entry.sprite
 		var light_sprite: Sprite2D = entry.light_sprite
 		var location_glow: PointLight2D = entry.location_glow
+		var name_glow: PointLight2D = entry.name_glow
 		var has_sprite: bool = entry.sprite != null
 		var is_hovered: bool = index == hovered_district
 		var is_selected: bool = index == game.selected_district
@@ -2133,6 +2259,13 @@ func _update_world_nodes(delta: float) -> void:
 					var glow_wave: float = 0.5 + 0.5 * sin(time * 0.55 + float(index) * 0.9)
 					location_glow.energy = lerp(0.58, 0.68, glow_wave)
 					location_glow.texture_scale = lerp(2.35, 2.85, glow_wave)
+		if name_glow != null:
+			var name_wave: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.001 * 0.45 + float(index) * 0.8)
+			name_glow.position = Vector2(0.0, -98.0 if has_sprite else -38.0)
+			var target_name_energy: float = lerp(1.45, 2.15, name_wave) * (1.95 if is_hovered else 1.0)
+			var target_name_scale: float = lerp(2.85, 4.15, name_wave) * (1.22 if is_hovered else 1.0)
+			name_glow.energy = lerp(name_glow.energy, target_name_energy, hover_lerp)
+			name_glow.texture_scale = lerp(name_glow.texture_scale, target_name_scale, hover_lerp)
 		var target_ring_radius: float = radius + 4.0
 		var target_ring_color := Color("#e7ecef", 0.75)
 		var target_ring_width: float = 2.0
@@ -2196,17 +2329,20 @@ func _update_cloud_visibility(delta: float) -> void:
 		var light_factor: float = _city_cloud_light_factor(sprite.position)
 		var route_light_factor: float = _route_cloud_light_factor(sprite.position)
 		var health_light_factor: float = _health_cloud_light_factor(sprite.position)
+		var weapon_range_light_factor: float = _weapon_range_cloud_light_factor(sprite.position)
 		var laser_light_factor: float = _laser_cloud_light_factor(sprite.position)
 		var destination_light_factor: float = _destination_cloud_light_factor(sprite.position)
 		var target_alpha: float = max_alpha * fade_in * lerp(1.0, 1.34, light_factor)
 		target_alpha *= lerp(1.0, 1.04, route_light_factor)
 		target_alpha *= lerp(1.0, 1.65, health_light_factor)
+		target_alpha *= lerp(1.0, 1.22, weapon_range_light_factor)
 		target_alpha *= lerp(1.0, 1.85, laser_light_factor)
 		target_alpha *= lerp(1.0, 1.50, destination_light_factor)
 		target_alpha = min(target_alpha, 0.95)
 		var target_tint: Color = Color(0.88, 0.96, 0.98, 1.0).lerp(Color(1.0, 0.72, 0.36, 1.0), light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.44, 1.0, 0.66, 1.0), route_light_factor * 0.12)
 		target_tint = target_tint.lerp(Color(0.36, 1.0, 0.56, 1.0), health_light_factor)
+		target_tint = target_tint.lerp(player_laser_color.lightened(0.18), weapon_range_light_factor * 0.42)
 		target_tint = target_tint.lerp(_color_with_alpha(_laser_cloud_color(sprite.position).lightened(0.25), 1.0), laser_light_factor)
 		target_tint = target_tint.lerp(Color(0.92, 1.0, 0.86, 1.0), destination_light_factor)
 		var color: Color = sprite.modulate
@@ -2217,7 +2353,9 @@ func _update_cloud_visibility(delta: float) -> void:
 		color.a = lerp(color.a, target_alpha, 0.10)
 		sprite.modulate = color
 		if not _cloud_visible_bounds().has_point(sprite.position):
-			_reposition_cloud_prop(prop, true)
+			var center: Vector2 = _cloud_visible_bounds().get_center()
+			var jumped_far: bool = sprite.position.distance_to(center) > max(size.x, size.y) * 1.35
+			_reposition_cloud_prop(prop, not jumped_far)
 	for prop in stale:
 		cloud_props.erase(prop)
 
@@ -2233,6 +2371,7 @@ func _reposition_cloud_prop(prop: Dictionary, from_wind_edge: bool) -> void:
 			cloud_rng.randf_range(bounds.position.x, bounds.end.x),
 			cloud_rng.randf_range(bounds.position.y, bounds.end.y)
 		)
+		prop["age"] = cloud_rng.randf_range(0.8, 2.4)
 		return
 	var velocity: Vector2 = prop["velocity"]
 	var wind: Vector2 = velocity.normalized()
@@ -2251,9 +2390,13 @@ func _city_cloud_light_factor(world_pos: Vector2) -> float:
 	var best: float = 0.0
 	for district in game.districts:
 		var district_name: String = district.name
+		var district_pos: Vector2 = district.pos
+		var label_pos: Vector2 = district_pos + Vector2(0.0, -98.0 if location_textures.has(district_name) else -38.0)
+		var label_distance: float = world_pos.distance_to(label_pos)
+		var label_light: float = clamp(1.0 - label_distance / 620.0, 0.0, 1.0)
+		best = max(best, pow(label_light, 1.18) * 1.35)
 		if not location_light_textures.has(district_name):
 			continue
-		var district_pos: Vector2 = district.pos
 		var radius: float = 900.0
 		if district_name == "Новый Колодец":
 			radius = 1080.0
@@ -2261,6 +2404,25 @@ func _city_cloud_light_factor(world_pos: Vector2) -> float:
 		var raw_light: float = clamp(1.0 - distance / radius, 0.0, 1.0)
 		best = max(best, raw_light * raw_light)
 	return best
+
+func _location_neon_color(faction_key: String) -> Color:
+	match faction_key:
+		"city":
+			return Color("#00eaff")
+		"agro":
+			return Color("#ff9f1c")
+		"oasis":
+			return Color("#00f6ff")
+		"data":
+			return Color("#9b2cff")
+		"eco":
+			return Color("#ff2bd6")
+		"pirates":
+			return Color("#ff1744")
+		"observers":
+			return Color("#45a3ff")
+		_:
+			return Color("#ff2bd6")
 
 func _route_cloud_light_factor(world_pos: Vector2) -> float:
 	if current_route_points.size() < 2:
@@ -2290,6 +2452,15 @@ func _health_cloud_light_factor(world_pos: Vector2) -> float:
 	var distance: float = world_pos.distance_to(bar_world_pos)
 	var raw_light: float = clamp(1.0 - distance / 360.0, 0.0, 1.0)
 	return pow(raw_light, 1.05) * lerp(0.65, 1.0, health_ratio)
+
+func _weapon_range_cloud_light_factor(world_pos: Vector2) -> float:
+	if game == null or not _is_weapon_hud_zone(get_local_mouse_position()):
+		return 0.0
+	var distance: float = world_pos.distance_to(game.player_pos)
+	var ring_distance: float = abs(distance - player_weapon_range)
+	var ring_light: float = clamp(1.0 - ring_distance / 170.0, 0.0, 1.0)
+	var inner_haze: float = clamp(1.0 - distance / player_weapon_range, 0.0, 1.0) * 0.14
+	return min(pow(ring_light, 1.35) * 0.86 + inner_haze, 0.94)
 
 func _destination_cloud_light_factor(world_pos: Vector2) -> float:
 	if game == null or not game.is_traveling:
@@ -2511,18 +2682,6 @@ func _draw_hover_card() -> void:
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 76), "Вода %d  Еда %d  Заряд %d" % [d.water, d.food, d.power], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 96), "Безопасность %d  Вычисления %d" % [d.security, d.compute], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
 
-func _draw_legend() -> void:
-	var x := 18.0
-	var y := size.y - 94.0
-	draw_string(get_theme_default_font(), Vector2(x, y), "Двигайте мышь к краям экрана: сдвиг карты. ЛКМ по карте: ехать. ЛКМ по точке: войти. ПКМ: центр на машине.", HORIZONTAL_ALIGNMENT_LEFT, 940, 12, Color("#cfd8dc"))
-	y += 26
-	var offset := 0.0
-	for key in game.FACTIONS.keys():
-		var f = game.FACTIONS[key]
-		draw_circle(Vector2(x + offset, y), 7, f.color)
-		draw_string(get_theme_default_font(), Vector2(x + offset + 12, y + 5), f.title, HORIZONTAL_ALIGNMENT_LEFT, 128, 11, Color("#cfd8dc"))
-		offset += 126
-
 func _draw_minimap() -> void:
 	var map_size := Vector2(205, 136)
 	var pos := Vector2(size.x - map_size.x - 18, 18)
@@ -2560,12 +2719,23 @@ func _update_hover(screen_pos: Vector2) -> void:
 		if dist < nearest_dist:
 			nearest_dist = dist
 			nearest = i
-	hovered_district = nearest if nearest_dist <= NODE_HIT_RADIUS else -1
+	hovered_district = nearest if nearest_dist <= NODE_HIT_RADIUS else _district_from_sign_hit(screen_pos)
 	if hovered_district == -1:
 		mouse_default_cursor_shape = Control.CURSOR_CROSS
 	else:
 		mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	queue_redraw()
+
+func _district_from_sign_hit(screen_pos: Vector2) -> int:
+	for i in range(game.districts.size()):
+		var d = game.districts[i]
+		var district_screen: Vector2 = _to_screen(d.pos)
+		var has_sprite: bool = location_textures.has(d.name)
+		var center: Vector2 = district_screen + Vector2(0.0, -122.0 if has_sprite else -52.0)
+		var rect := Rect2(center - Vector2(142.0, 30.0), Vector2(284.0, 58.0))
+		if rect.has_point(screen_pos):
+			return i
+	return -1
 
 func _center_on(world_pos: Vector2) -> void:
 	camera_offset = world_pos - size * 0.5

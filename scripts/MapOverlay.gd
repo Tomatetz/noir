@@ -1,13 +1,23 @@
 extends Control
 
+var neon_font: Font
+var sign_hover_levels := {}
 var map
 
 func bind(map_ref) -> void:
 	map = map_ref
+	var font_file := FontFile.new()
+	if font_file.load_dynamic_font("res://assets/fonts/Jura.ttf") == OK:
+		neon_font = font_file
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_process(true)
 
 func _process(_delta: float) -> void:
+	if map != null and map.game != null:
+		for i in range(map.game.districts.size()):
+			var current: float = sign_hover_levels.get(i, 0.0)
+			var target := 1.0 if map.hovered_district == i else 0.0
+			sign_hover_levels[i] = lerp(current, target, 0.14)
 	queue_redraw()
 
 func _draw() -> void:
@@ -17,9 +27,9 @@ func _draw() -> void:
 	_draw_route_overlay()
 	_draw_destination_overlay()
 	_draw_weapon_range_overlay()
+	_draw_location_name_labels()
 	_draw_hover_card()
 	_draw_weapon_hud()
-	_draw_legend()
 	if not map.fullscreen_view:
 		_draw_minimap()
 
@@ -27,8 +37,11 @@ func _draw_rain() -> void:
 	if size.x <= 0.0 or size.y <= 0.0:
 		return
 	var time: float = Time.get_ticks_msec() * 0.001
-	var gust_angle: float = -0.22 + sin(time * 0.17) * 0.05
-	var base_rain_direction := Vector2(gust_angle, 1.0).normalized()
+	var cloud_direction: Vector2 = map.cloud_wind_velocity.normalized()
+	if cloud_direction.length() <= 0.01:
+		cloud_direction = Vector2.RIGHT
+	var base_rain_direction: Vector2 = (cloud_direction * 0.42 + Vector2.DOWN).normalized()
+	base_rain_direction = base_rain_direction.rotated(sin(time * 0.17) * 0.035)
 	var wrap_size := size + Vector2(260.0, 260.0)
 	for i in range(map.RAIN_STREAK_COUNT):
 		var h1: float = map._hash01(map.rain_seed + i * 37)
@@ -41,14 +54,14 @@ func _draw_rain() -> void:
 		var travel: Vector2 = rain_direction * time * speed
 		var x: float = fposmod(h1 * wrap_size.x + travel.x, wrap_size.x) - 130.0
 		var y: float = fposmod(h2 * wrap_size.y + travel.y, wrap_size.y) - 130.0
-		var start := Vector2(x, y)
+		var head := Vector2(x, y)
 		var length: float = lerp(10.0, 70.0, pow(h5, 1.75))
-		var end := start - rain_direction * length
-		var headlight_factor: float = _screen_headlight_factor((start + end) * 0.5)
+		var tail := head - rain_direction * length
+		var headlight_factor: float = _screen_headlight_factor((head + tail) * 0.5)
 		var alpha: float = lerp(0.040, 0.120, h3) + headlight_factor * lerp(0.09, 0.22, h5)
 		var rain_color: Color = Color("#d8eeee").lerp(Color("#caffd7"), min(0.75, headlight_factor))
 		rain_color.a = min(alpha, 0.34)
-		draw_line(start, end, rain_color, lerp(0.42, 0.95, headlight_factor), true)
+		draw_line(tail, head, rain_color, lerp(0.42, 0.95, headlight_factor), true)
 
 func _draw_route_overlay() -> void:
 	if map.current_route_points.size() < 2:
@@ -150,7 +163,7 @@ func _draw_hover_card() -> void:
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 96), "Безопасность %d  Вычисления %d" % [d.security, d.compute], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
 
 func _draw_weapon_hud() -> void:
-	var slot_center := Vector2(36.0, 78.0)
+	var slot_center := _weapon_slot_center()
 	var radius := 18.0
 	var slot_rect := Rect2(slot_center - Vector2(radius + 12.0, radius + 12.0), Vector2(radius + 12.0, radius + 12.0) * 2.0)
 	var hovered: bool = slot_rect.has_point(get_local_mouse_position())
@@ -184,9 +197,7 @@ func _draw_weapon_hud() -> void:
 	draw_string(get_theme_default_font(), slot_center + Vector2(28.0, 5.0), "Лазер", HORIZONTAL_ALIGNMENT_LEFT, 90, 11, Color("#cfd8dc", 0.88))
 
 func _draw_weapon_range_overlay() -> void:
-	var slot_center := Vector2(36.0, 78.0)
-	var radius := 30.0
-	if not Rect2(slot_center - Vector2(radius, radius), Vector2(radius, radius) * 2.0).has_point(get_local_mouse_position()):
+	if not _weapon_hud_rect().has_point(get_local_mouse_position()):
 		return
 	var center: Vector2 = map._to_screen(map.game.player_pos)
 	var weapon_color: Color = map.player_laser_color
@@ -194,32 +205,109 @@ func _draw_weapon_range_overlay() -> void:
 	draw_circle(center, range_radius, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.018))
 	_draw_dashed_circle(center, range_radius, weapon_color)
 
+func _draw_location_name_labels() -> void:
+	for i in range(map.game.districts.size()):
+		var d = map.game.districts[i]
+		var screen_pos: Vector2 = map._to_screen(d.pos)
+		if not Rect2(Vector2(-260.0, -220.0), size + Vector2(520.0, 440.0)).has_point(screen_pos):
+			continue
+		var has_sprite: bool = map.location_textures.has(d.name)
+		var label_center: Vector2 = screen_pos + Vector2(0.0, -122.0 if has_sprite else -52.0)
+		var neon_color: Color = _location_neon_color(d.faction)
+		_draw_neon_sign(d.name, label_center, neon_color, i, sign_hover_levels.get(i, 0.0))
+
+func _draw_neon_sign(text: String, center: Vector2, color: Color, seed: int, hover_amount: float) -> void:
+	var font: Font = neon_font if neon_font != null else get_theme_default_font()
+	var font_size := 23
+	var total_size: Vector2 = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
+	var cursor := center + Vector2(-total_size.x * 0.5, 0.0)
+	var time: float = Time.get_ticks_msec() * 0.001
+	var tube_color := color.lightened(0.55 + hover_amount * 0.25)
+	for i in range(text.length()):
+		var ch := text.substr(i, 1)
+		var ch_size: Vector2 = font.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
+		if ch == " ":
+			cursor.x += max(ch_size.x, 8.0)
+			continue
+		var phase: float = float(seed * 37 + i * 19)
+		var shimmer: float = 0.90 + 0.10 * sin(time * (3.2 + float(i % 3) * 0.7) + phase)
+		var weak_letter: bool = map._hash01(seed * 97 + i * 41) < 0.28
+		var blink_gate: float = sin(time * (8.5 + float(i % 2) * 1.8) + phase * 0.31)
+		var blink: float = lerp(0.34, 0.58, hover_amount) if weak_letter and blink_gate > 0.72 else 1.0
+		var intensity: float = min(1.65, shimmer * blink * (1.0 + hover_amount * 0.55))
+		var letter_color: Color = tube_color
+		if weak_letter:
+			var fault_mix: float = 0.36 + 0.26 * sin(time * 5.7 + phase)
+			var fault_color: Color = _fault_neon_color(color, seed + i)
+			letter_color = tube_color.lerp(fault_color, fault_mix)
+		var char_pos := cursor
+		var glow_alpha: float = min(0.88, (0.34 + hover_amount * 0.28) * intensity)
+		for offset in [Vector2(-4.0, 0.0), Vector2(4.0, 0.0), Vector2(0.0, -4.0), Vector2(0.0, 4.0)]:
+			draw_string(font, char_pos + offset, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 6.0, font_size, Color(letter_color.r, letter_color.g, letter_color.b, glow_alpha * 0.30))
+		for offset in [Vector2(-2.2, 0.0), Vector2(2.2, 0.0), Vector2(0.0, -2.2), Vector2(0.0, 2.2)]:
+			draw_string(font, char_pos + offset, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 4.0, font_size, Color(letter_color.r, letter_color.g, letter_color.b, glow_alpha))
+		for offset in [Vector2(-1.0, 0.0), Vector2(1.0, 0.0), Vector2(0.0, -1.0), Vector2(0.0, 1.0)]:
+			draw_string(font, char_pos + offset, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 3.0, font_size, Color(letter_color.r, letter_color.g, letter_color.b, min(1.0, 0.70 * intensity)))
+		draw_string(font, char_pos + Vector2(1.0, 1.0), ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 3.0, font_size, Color("#011012", 0.80))
+		draw_string(font, char_pos, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 3.0, font_size, Color("#ffffff", min(1.0, 0.78 + 0.26 * intensity)).lerp(letter_color.lightened(0.55), 0.42))
+		cursor.x += ch_size.x + 1.0
+
+func _location_neon_color(faction_key: String) -> Color:
+	match faction_key:
+		"city":
+			return Color("#00eaff")
+		"agro":
+			return Color("#ff9f1c")
+		"oasis":
+			return Color("#00f6ff")
+		"data":
+			return Color("#9b2cff")
+		"eco":
+			return Color("#ff2bd6")
+		"pirates":
+			return Color("#ff1744")
+		"observers":
+			return Color("#45a3ff")
+		_:
+			return Color("#ff2bd6")
+
+func _fault_neon_color(base: Color, seed: int) -> Color:
+	var palette := [
+		Color("#ff2bd6"),
+		Color("#ff7a00"),
+		Color("#9b2cff"),
+		Color("#ff1744"),
+		Color("#00eaff"),
+		Color("#fff45c")
+	]
+	var index: int = int(floor(map._hash01(seed * 131 + 17) * float(palette.size()))) % palette.size()
+	var candidate: Color = palette[index]
+	if abs(candidate.r - base.r) + abs(candidate.g - base.g) + abs(candidate.b - base.b) < 0.45:
+		candidate = palette[(index + 2) % palette.size()]
+	return candidate.lightened(0.12)
+
+func _weapon_slot_center() -> Vector2:
+	return Vector2(58.0, max(88.0, size.y - 74.0))
+
+func _weapon_hud_rect() -> Rect2:
+	var center := _weapon_slot_center()
+	return Rect2(center - Vector2(48.0, 44.0), Vector2(176.0, 88.0))
+
 func _draw_dashed_circle(center: Vector2, radius: float, color: Color) -> void:
-	var segments := 96
-	var dash_segments := 4
-	var gap_segments := 3
+	var segments := 192
+	var dash_segments := 2
+	var gap_segments := 1
+	var spin: float = Time.get_ticks_msec() * 0.00018
 	for i in range(segments):
 		var cycle := dash_segments + gap_segments
 		if i % cycle >= dash_segments:
 			continue
-		var a0: float = TAU * float(i) / float(segments)
-		var a1: float = TAU * float(i + 1) / float(segments)
+		var a0: float = spin + TAU * float(i) / float(segments)
+		var a1: float = spin + TAU * float(i + 1) / float(segments)
 		var p0: Vector2 = center + Vector2(cos(a0), sin(a0)) * radius
 		var p1: Vector2 = center + Vector2(cos(a1), sin(a1)) * radius
-		draw_line(p0, p1, Color(color.r, color.g, color.b, 0.18), 5.0, true)
-		draw_line(p0, p1, Color(color.r, color.g, color.b, 0.74), 1.4, true)
-
-func _draw_legend() -> void:
-	var x := 18.0
-	var y := size.y - 94.0
-	draw_string(get_theme_default_font(), Vector2(x, y), "Двигайте мышь к краям экрана: сдвиг карты. ЛКМ по карте: ехать. ЛКМ по точке: войти. ПКМ: центр на машине.", HORIZONTAL_ALIGNMENT_LEFT, 940, 12, Color("#cfd8dc"))
-	y += 26
-	var offset := 0.0
-	for key in map.game.FACTIONS.keys():
-		var f = map.game.FACTIONS[key]
-		draw_circle(Vector2(x + offset, y), 7, f.color)
-		draw_string(get_theme_default_font(), Vector2(x + offset + 12, y + 5), f.title, HORIZONTAL_ALIGNMENT_LEFT, 128, 11, Color("#cfd8dc"))
-		offset += 126
+		draw_line(p0, p1, Color(color.r, color.g, color.b, 0.13), 4.2, true)
+		draw_line(p0, p1, Color(color.r, color.g, color.b, 0.66), 1.15, true)
 
 func _draw_minimap() -> void:
 	var map_size := Vector2(205, 136)

@@ -87,9 +87,11 @@ var root_split: HSplitContainer
 var map_panel: Panel
 var dashboard_bar: HBoxContainer
 var dashboard_tooltip: Label
+var modal_layer: CanvasLayer
 var modal_panel: PanelContainer
 var fullscreen_map_panel: PanelContainer
 var fullscreen_map_view: Control
+var pause_menu_panel: Control
 var right_tabs: TabContainer
 var status_label: Label
 var location_label: Label
@@ -227,14 +229,21 @@ func _build_ui() -> void:
 	_build_dashboard()
 	_build_modal()
 	_build_fullscreen_map()
+	_build_pause_menu()
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		if fullscreen_map_panel.visible:
+		if pause_menu_panel != null and pause_menu_panel.visible:
+			pause_menu_panel.visible = false
+			get_viewport().set_input_as_handled()
+		elif fullscreen_map_panel.visible:
 			fullscreen_map_panel.visible = false
 			get_viewport().set_input_as_handled()
 		elif modal_panel.visible:
 			_close_modal()
+			get_viewport().set_input_as_handled()
+		else:
+			_open_pause_menu()
 			get_viewport().set_input_as_handled()
 
 func _build_dashboard() -> void:
@@ -296,15 +305,15 @@ func _hide_dashboard_tooltip() -> void:
 	dashboard_tooltip.visible = false
 
 func _build_modal() -> void:
+	_ensure_modal_layer()
 	modal_panel = PanelContainer.new()
-	modal_panel.z_index = 100
 	modal_panel.visible = false
 	modal_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	modal_panel.offset_left = 46
-	modal_panel.offset_top = 42
-	modal_panel.offset_right = -46
-	modal_panel.offset_bottom = -42
-	add_child(modal_panel)
+	modal_panel.offset_left = 0
+	modal_panel.offset_top = 0
+	modal_panel.offset_right = 0
+	modal_panel.offset_bottom = 0
+	modal_layer.add_child(modal_panel)
 
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 18)
@@ -349,6 +358,8 @@ func _build_modal() -> void:
 
 func _open_modal(tab_index: int) -> void:
 	fullscreen_map_panel.visible = false
+	if pause_menu_panel != null:
+		pause_menu_panel.visible = false
 	modal_panel.visible = true
 	right_tabs.current_tab = tab_index
 
@@ -373,15 +384,15 @@ func _close_modal() -> void:
 		_travel_to_point(exit_target, -1, "выезд из %s" % districts[current_district].name, false, true)
 
 func _build_fullscreen_map() -> void:
+	_ensure_modal_layer()
 	fullscreen_map_panel = PanelContainer.new()
-	fullscreen_map_panel.z_index = 90
 	fullscreen_map_panel.visible = false
 	fullscreen_map_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	fullscreen_map_panel.offset_left = 30
 	fullscreen_map_panel.offset_top = 30
 	fullscreen_map_panel.offset_right = -30
 	fullscreen_map_panel.offset_bottom = -30
-	add_child(fullscreen_map_panel)
+	modal_layer.add_child(fullscreen_map_panel)
 
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 14)
@@ -423,15 +434,75 @@ func _build_fullscreen_map() -> void:
 
 func _open_fullscreen_map() -> void:
 	modal_panel.visible = false
+	if pause_menu_panel != null:
+		pause_menu_panel.visible = false
 	fullscreen_map_panel.visible = true
 	fullscreen_map_view.queue_redraw()
 
 func _is_map_blocked(map_view: Control) -> bool:
+	if pause_menu_panel != null and pause_menu_panel.visible:
+		return true
 	if modal_panel != null and modal_panel.visible:
 		return true
 	if fullscreen_map_panel != null and fullscreen_map_panel.visible and map_view != fullscreen_map_view:
 		return true
 	return false
+
+func _ensure_modal_layer() -> void:
+	if modal_layer != null:
+		return
+	modal_layer = CanvasLayer.new()
+	modal_layer.layer = 60
+	add_child(modal_layer)
+
+func _build_pause_menu() -> void:
+	_ensure_modal_layer()
+	pause_menu_panel = Control.new()
+	pause_menu_panel.visible = false
+	pause_menu_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	modal_layer.add_child(pause_menu_panel)
+
+	var dim := ColorRect.new()
+	dim.color = Color("#020608", 0.74)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	pause_menu_panel.add_child(dim)
+
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	pause_menu_panel.add_child(center)
+
+	var box := VBoxContainer.new()
+	box.custom_minimum_size = Vector2(320, 0)
+	box.add_theme_constant_override("separation", 12)
+	center.add_child(box)
+
+	var title := Label.new()
+	title.text = "Пауза"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", Color("#f2fbff"))
+	box.add_child(title)
+
+	var restart_button := Button.new()
+	restart_button.text = "Начать заново"
+	restart_button.custom_minimum_size = Vector2(0, 46)
+	restart_button.pressed.connect(func(): get_tree().reload_current_scene())
+	box.add_child(restart_button)
+
+	var quit_button := Button.new()
+	quit_button.text = "Выход"
+	quit_button.custom_minimum_size = Vector2(0, 46)
+	quit_button.pressed.connect(func(): get_tree().quit())
+	box.add_child(quit_button)
+
+func _open_pause_menu() -> void:
+	if pause_menu_panel == null:
+		return
+	if modal_panel != null:
+		modal_panel.visible = false
+	if fullscreen_map_panel != null:
+		fullscreen_map_panel.visible = false
+	pause_menu_panel.visible = true
 
 func _make_tab_margin(tab_title: String) -> MarginContainer:
 	var margin := MarginContainer.new()
