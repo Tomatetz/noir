@@ -6,7 +6,8 @@ const VEHICLE_TEXTURE_SCALE := 0.052
 const MAP_BACKGROUND := Color("#111c1f")
 const CLOUD_POOL_SIZE := 104
 const RAIN_STREAK_COUNT := 180
-const RAIN_IMPACT_RATE := 95.0
+const RAIN_IMPACT_RATE := 240.0
+const WHEEL_SPRAY_RATE := 34.0
 
 var car_texture: Texture2D
 var light_front_texture: Texture2D
@@ -57,6 +58,10 @@ var routes_root: Node2D
 var travel_route_root: Node2D
 var clouds_root: Node2D
 var districts_root: Node2D
+var rain_surface_root: Node2D
+var wheel_spray_root: Node2D
+var car_shadow_sprite: Sprite2D
+var car_shadow_material: ShaderMaterial
 var destination_marker_root: Node2D
 var destination_marker_glow: Polygon2D
 var destination_marker_core: Polygon2D
@@ -87,6 +92,10 @@ var cloud_wind_velocity := Vector2(7.0, -3.0)
 var rain_seed := 0
 var rain_impact_accumulator := 0.0
 var rain_impacts: Array[Dictionary] = []
+var rain_splash_textures: Array[Texture2D] = []
+var wheel_spray_accumulator := 0.0
+var pirate_wheel_spray_accumulator := 0.0
+var wheel_sprays: Array[Dictionary] = []
 var overlay: Control
 
 var game: Control
@@ -103,6 +112,14 @@ var bump_phase := 0.0
 var bump_duration := 0.0
 var bump_strength := 0.0
 var bump_roll_strength := 0.0
+var shadow_sweep_timer := 0.4
+var shadow_sweep_phase := 0.0
+var shadow_sweep_duration := 0.0
+var shadow_sweep_intensity := 0.0
+var shadow_sweep_angle := 0.0
+var shadow_sweep_start := Vector2.ZERO
+var shadow_sweep_end := Vector2.ZERO
+var shadow_sweep_texture_scale := 1.0
 var headlight_glitch_timer := 5.0
 var headlight_glitch_phase := 0.0
 var headlight_glitch_duration := 0.0
@@ -290,6 +307,15 @@ func _setup_world_nodes() -> void:
 	districts_root = Node2D.new()
 	districts_root.z_index = 14
 	world_root.add_child(districts_root)
+
+	rain_surface_root = Node2D.new()
+	rain_surface_root.z_index = 16
+	world_root.add_child(rain_surface_root)
+
+	wheel_spray_root = Node2D.new()
+	wheel_spray_root.z_index = 9
+	world_root.add_child(wheel_spray_root)
+
 	_setup_canvas_modulate()
 	_rebuild_world_nodes()
 	road_bump_rng.randomize()
@@ -474,6 +500,18 @@ func _setup_vehicle_node() -> void:
 	car_sprite.z_as_relative = true
 	car_sprite.light_mask = 1
 	vehicle_root.add_child(car_sprite)
+
+	car_shadow_sprite = Sprite2D.new()
+	car_shadow_sprite.texture = car_texture
+	car_shadow_sprite.scale = Vector2(VEHICLE_TEXTURE_SCALE, VEHICLE_TEXTURE_SCALE)
+	car_shadow_sprite.z_index = 2
+	car_shadow_sprite.z_as_relative = true
+	car_shadow_sprite.visible = false
+	car_shadow_material = _make_car_shadow_material()
+	if not cloud_textures.is_empty():
+		car_shadow_material.set_shader_parameter("shadow_texture", cloud_textures[0])
+	car_shadow_sprite.material = car_shadow_material
+	vehicle_root.add_child(car_shadow_sprite)
 
 	front_overlay_sprite = Sprite2D.new()
 	front_overlay_sprite.texture = light_front_texture
@@ -777,6 +815,35 @@ func _make_front_light() -> PointLight2D:
 	light.texture_scale = 0.94
 	return light
 
+func _make_car_shadow_material() -> ShaderMaterial:
+	var shader := Shader.new()
+	shader.code = """
+shader_type canvas_item;
+
+uniform sampler2D shadow_texture;
+uniform vec2 shadow_offset = vec2(0.5, 0.5);
+uniform float shadow_angle = 0.0;
+uniform float shadow_scale = 1.0;
+uniform float shadow_intensity = 0.0;
+
+void fragment() {
+	vec4 car = texture(TEXTURE, UV);
+	vec2 centered = UV - vec2(0.5);
+	float cs = cos(shadow_angle);
+	float sn = sin(shadow_angle);
+	vec2 rotated = vec2(centered.x * cs - centered.y * sn, centered.x * sn + centered.y * cs);
+	vec2 cloud_uv = rotated / max(0.001, shadow_scale) + shadow_offset;
+	float inside = step(0.0, cloud_uv.x) * step(cloud_uv.x, 1.0) * step(0.0, cloud_uv.y) * step(cloud_uv.y, 1.0);
+	vec4 cloud = texture(shadow_texture, cloud_uv);
+	float shade = smoothstep(0.10, 0.72, cloud.a) * inside * car.a * shadow_intensity;
+	COLOR = vec4(0.0, 0.0, 0.0, shade);
+}
+"""
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	material.set_shader_parameter("shadow_intensity", 0.0)
+	return material
+
 func _make_radial_light_texture(color: Color) -> Texture2D:
 	var image := Image.create(128, 128, false, Image.FORMAT_RGBA8)
 	var center := Vector2(64, 64)
@@ -822,6 +889,8 @@ func _process(delta: float) -> void:
 	_update_pirate(delta)
 	_update_damage_popups(delta)
 	_update_rain_impacts(delta)
+	_update_wheel_sprays(delta)
+	_update_shadow_sweep(delta)
 	_update_destination_marker()
 	_update_world_nodes(delta)
 	_update_cloud_props(delta)
@@ -947,7 +1016,7 @@ func _draw_rain() -> void:
 		draw_line(start, end, rain_color, lerp(0.65, 1.45, headlight_factor), true)
 
 func _update_rain_impacts(delta: float) -> void:
-	if game == null or size.x <= 0.0 or size.y <= 0.0:
+	if game == null or rain_surface_root == null or size.x <= 0.0 or size.y <= 0.0:
 		return
 	rain_impact_accumulator += delta * RAIN_IMPACT_RATE
 	while rain_impact_accumulator >= 1.0:
@@ -955,15 +1024,26 @@ func _update_rain_impacts(delta: float) -> void:
 		_spawn_rain_impact()
 	for i in range(rain_impacts.size() - 1, -1, -1):
 		var impact: Dictionary = rain_impacts[i]
-		impact["age"] = float(impact["age"]) + delta
-		if float(impact["age"]) >= float(impact["life"]):
+		var sprite: Sprite2D = impact["sprite"] as Sprite2D
+		var age: float = float(impact["age"]) + delta
+		impact["age"] = age
+		var life: float = float(impact["life"])
+		if age >= life:
+			if is_instance_valid(sprite):
+				sprite.queue_free()
 			rain_impacts.remove_at(i)
 		else:
+			if is_instance_valid(sprite):
+				_update_rain_impact_sprite(impact)
 			rain_impacts[i] = impact
 
 func _spawn_rain_impact() -> void:
+	if rain_surface_root == null:
+		return
+	if rain_splash_textures.is_empty():
+		_build_rain_splash_textures()
 	var world_pos: Vector2
-	var prefer_headlight: bool = road_bump_rng.randf() < 0.72
+	var prefer_headlight: bool = road_bump_rng.randf() < 0.82
 	if prefer_headlight:
 		var forward := Vector2.RIGHT.rotated(game.vehicle_angle)
 		if game.is_traveling and game.vehicle_velocity.length() > 2.0:
@@ -980,45 +1060,221 @@ func _spawn_rain_impact() -> void:
 	world_pos.x = clamp(world_pos.x, 0.0, WORLD_SIZE.x)
 	world_pos.y = clamp(world_pos.y, 0.0, WORLD_SIZE.y)
 	var light_factor: float = _headlight_weather_factor(world_pos)
-	rain_impacts.append({
+	var sprite := Sprite2D.new()
+	var seed: int = road_bump_rng.randi()
+	sprite.texture = rain_splash_textures[posmod(seed, rain_splash_textures.size())]
+	sprite.position = world_pos
+	sprite.rotation = road_bump_rng.randf_range(-0.25, 0.25)
+	sprite.z_index = 0
+	var impact := {
+		"sprite": sprite,
 		"world_pos": world_pos,
 		"age": 0.0,
-		"life": road_bump_rng.randf_range(0.34, 0.68),
-		"radius": road_bump_rng.randf_range(7.0, 18.0),
-		"seed": road_bump_rng.randi(),
+		"life": road_bump_rng.randf_range(0.42, 0.78),
+		"scale": road_bump_rng.randf_range(0.075, 0.14),
+		"seed": seed,
 		"light": light_factor
-	})
-	if rain_impacts.size() > 360:
-		rain_impacts.remove_at(0)
+	}
+	rain_surface_root.add_child(sprite)
+	rain_impacts.append(impact)
+	_update_rain_impact_sprite(impact)
+	if rain_impacts.size() > 620:
+		var old_impact: Dictionary = rain_impacts.pop_front()
+		var old_sprite: Sprite2D = old_impact["sprite"] as Sprite2D
+		if is_instance_valid(old_sprite):
+			old_sprite.queue_free()
 
-func _draw_rain_impacts() -> void:
-	for impact in rain_impacts:
-		var age: float = float(impact["age"])
-		var life: float = max(0.01, float(impact["life"]))
-		var t: float = clamp(age / life, 0.0, 1.0)
-		var world_pos: Vector2 = impact["world_pos"]
-		var screen_pos: Vector2 = _to_screen(world_pos)
-		if not Rect2(Vector2(-24.0, -24.0), size + Vector2(48.0, 48.0)).has_point(screen_pos):
-			continue
-		var light_factor: float = max(float(impact["light"]), _headlight_weather_factor(world_pos))
-		var radius: float = lerp(1.5, float(impact["radius"]), t)
-		var fade: float = pow(1.0 - t, 1.05)
-		var color: Color = Color("#a9bec2").lerp(Color("#d9ffd8"), min(0.85, light_factor))
-		color.a = fade * lerp(0.34, 0.82, light_factor)
-		var seed: int = int(impact["seed"])
-		var start_angle: float = _hash01(seed) * TAU
-		var arc_len: float = lerp(2.4, 5.2, _hash01(seed + 17))
-		draw_circle(screen_pos, max(1.1, radius * 0.18), Color(color.r, color.g, color.b, color.a * 0.22))
-		draw_arc(screen_pos, radius, start_angle, start_angle + arc_len, 18, color, lerp(1.1, 2.3, light_factor), true)
-		for j in range(3):
-			var spoke_angle: float = start_angle + TAU * _hash01(seed + j * 29 + 101)
-			var spoke_dir := Vector2.RIGHT.rotated(spoke_angle)
-			var spoke_len: float = radius * lerp(0.42, 0.86, _hash01(seed + j * 31 + 113))
-			var spoke_color := Color(color.r, color.g, color.b, color.a * 0.48)
-			draw_line(screen_pos + spoke_dir * radius * 0.20, screen_pos + spoke_dir * spoke_len, spoke_color, lerp(0.75, 1.45, light_factor), true)
-		if light_factor > 0.2:
-			var glint_color := Color("#eaffdf", fade * light_factor * 0.62)
-			draw_line(screen_pos + Vector2(-radius * 0.75, 0.0), screen_pos + Vector2(radius * 0.75, 0.0), glint_color, 1.1, true)
+func _update_rain_impact_sprite(impact: Dictionary) -> void:
+	var sprite: Sprite2D = impact["sprite"] as Sprite2D
+	if not is_instance_valid(sprite):
+		return
+	var age: float = float(impact["age"])
+	var life: float = max(0.01, float(impact["life"]))
+	var t: float = clamp(age / life, 0.0, 1.0)
+	var world_pos: Vector2 = impact["world_pos"]
+	var light_factor: float = max(float(impact["light"]), _headlight_weather_factor(world_pos))
+	var base_scale: float = float(impact["scale"])
+	var fade: float = pow(1.0 - t, 1.18)
+	sprite.scale = Vector2.ONE * lerp(base_scale * 0.55, base_scale * 1.55, t)
+	var color: Color = Color("#cfe8e8").lerp(Color("#e8ffe2"), min(0.9, light_factor))
+	color.a = fade * lerp(0.38, 0.82, light_factor)
+	sprite.modulate = color
+
+func _update_wheel_sprays(delta: float) -> void:
+	if game == null or wheel_spray_root == null:
+		return
+	var moving: bool = game.is_traveling and game.vehicle_current_speed > 28.0 and game.vehicle_velocity.length() > 2.0
+	if moving:
+		var speed_factor: float = clamp(game.vehicle_current_speed / max(1.0, game.vehicle_speed), 0.0, 1.35)
+		wheel_spray_accumulator += delta * WHEEL_SPRAY_RATE * lerp(0.35, 1.0, min(1.0, speed_factor))
+		while wheel_spray_accumulator >= 1.0:
+			wheel_spray_accumulator -= 1.0
+			var spray_chance: float = lerp(0.34, 0.72, min(1.0, speed_factor))
+			if road_bump_rng.randf() < spray_chance:
+				_spawn_wheel_spray(game.player_pos, game.vehicle_velocity, game.vehicle_current_speed, game.vehicle_speed, game.vehicle_is_braking, speed_factor)
+	else:
+		wheel_spray_accumulator = min(wheel_spray_accumulator, 0.6)
+	if pirate_active and pirate_root != null and pirate_root.visible:
+		var pirate_forward: Vector2 = Vector2.RIGHT.rotated(pirate_angle)
+		var pirate_velocity: Vector2 = pirate_forward * pirate_speed
+		var pirate_speed_factor: float = clamp(pirate_speed / 190.0, 0.0, 1.25)
+		pirate_wheel_spray_accumulator += delta * WHEEL_SPRAY_RATE * 0.62
+		while pirate_wheel_spray_accumulator >= 1.0:
+			pirate_wheel_spray_accumulator -= 1.0
+			if road_bump_rng.randf() < 0.50:
+				_spawn_wheel_spray(pirate_pos, pirate_velocity, pirate_speed, 190.0, false, pirate_speed_factor)
+	else:
+		pirate_wheel_spray_accumulator = min(pirate_wheel_spray_accumulator, 0.6)
+	for i in range(wheel_sprays.size() - 1, -1, -1):
+		var spray: Dictionary = wheel_sprays[i]
+		var line: Line2D = spray["line"] as Line2D
+		var age: float = float(spray["age"]) + delta
+		spray["age"] = age
+		var life: float = float(spray["life"])
+		if age >= life:
+			if is_instance_valid(line):
+				line.queue_free()
+			wheel_sprays.remove_at(i)
+		else:
+			if is_instance_valid(line):
+				_update_wheel_spray_line(spray)
+			wheel_sprays[i] = spray
+
+func _spawn_wheel_spray(vehicle_pos: Vector2, vehicle_velocity: Vector2, current_speed: float, max_speed: float, braking: bool, speed_factor: float) -> void:
+	if wheel_spray_root == null or vehicle_velocity.length() <= 2.0:
+		return
+	var forward: Vector2 = vehicle_velocity.normalized()
+	var side: Vector2 = forward.orthogonal()
+	var rear_center: Vector2 = vehicle_pos - forward * 28.0
+	var wheel_side: float = -1.0 if road_bump_rng.randi_range(0, 1) == 0 else 1.0
+	var origin: Vector2 = rear_center + side * wheel_side * road_bump_rng.randf_range(10.0, 13.5)
+	origin += forward * road_bump_rng.randf_range(-3.0, 3.0)
+	var spray_velocity: Vector2 = -forward * road_bump_rng.randf_range(34.0, 86.0)
+	spray_velocity += side * wheel_side * road_bump_rng.randf_range(8.0, 28.0)
+	spray_velocity += side * road_bump_rng.randf_range(-7.0, 7.0)
+	var line := Line2D.new()
+	line.antialiased = true
+	line.width = road_bump_rng.randf_range(0.35, 0.85)
+	line.default_color = Color("#cfe9e8", 0.0)
+	wheel_spray_root.add_child(line)
+	var spray := {
+		"line": line,
+		"origin": origin,
+		"velocity": spray_velocity,
+		"age": 0.0,
+		"life": road_bump_rng.randf_range(0.12, 0.28),
+		"length": road_bump_rng.randf_range(3.0, 9.0) * lerp(0.65, 1.15, min(1.0, speed_factor)),
+		"width": line.width,
+		"alpha": road_bump_rng.randf_range(0.10, 0.34),
+		"speed_ratio": clamp(current_speed / max(1.0, max_speed), 0.0, 1.25),
+		"brake": 1.0 if braking else 0.0,
+		"seed": road_bump_rng.randf_range(0.0, TAU)
+	}
+	wheel_sprays.append(spray)
+	_update_wheel_spray_line(spray)
+	if wheel_sprays.size() > 100:
+		var old_spray: Dictionary = wheel_sprays.pop_front()
+		var old_line: Line2D = old_spray["line"] as Line2D
+		if is_instance_valid(old_line):
+			old_line.queue_free()
+
+func _update_wheel_spray_line(spray: Dictionary) -> void:
+	var line: Line2D = spray["line"] as Line2D
+	if not is_instance_valid(line):
+		return
+	var age: float = float(spray["age"])
+	var life: float = max(0.01, float(spray["life"]))
+	var t: float = clamp(age / life, 0.0, 1.0)
+	var origin: Vector2 = spray["origin"]
+	var velocity: Vector2 = spray["velocity"]
+	var drift: Vector2 = velocity * age
+	var direction: Vector2 = velocity.normalized() if velocity.length() > 0.01 else Vector2.LEFT
+	var jitter: Vector2 = direction.orthogonal() * sin(float(spray["seed"]) + t * TAU) * 1.3 * (1.0 - t)
+	var tail: Vector2 = origin + drift + jitter
+	var head: Vector2 = tail - direction * float(spray["length"]) * lerp(1.0, 0.25, t)
+	line.points = PackedVector2Array([head, tail])
+	line.width = max(0.1, lerp(float(spray["width"]), 0.12, t))
+	var brake_factor: float = float(spray["brake"]) * pow(1.0 - t, 0.7)
+	var color: Color = Color("#cfe9e8").lerp(Color("#ff6b63"), brake_factor * 0.34)
+	color.a = pow(1.0 - t, 1.45) * float(spray["alpha"]) * lerp(0.70, 1.18, min(1.0, float(spray["speed_ratio"])))
+	line.default_color = color
+
+func _update_shadow_sweep(delta: float) -> void:
+	if car_shadow_sprite == null or car_shadow_material == null or game == null:
+		return
+	if not game.is_traveling or game.vehicle_current_speed < 24.0:
+		shadow_sweep_phase = max(0.0, shadow_sweep_phase - delta * 2.4)
+		_set_car_shadow_intensity(0.0)
+		return
+	if shadow_sweep_phase <= 0.0:
+		shadow_sweep_timer -= delta
+		if shadow_sweep_timer <= 0.0:
+			if road_bump_rng.randf() < 0.78:
+				_start_shadow_sweep()
+			shadow_sweep_timer = road_bump_rng.randf_range(0.35, 1.35)
+	else:
+		shadow_sweep_phase = max(0.0, shadow_sweep_phase - delta)
+	var intensity := 0.0
+	if shadow_sweep_phase > 0.0 and shadow_sweep_duration > 0.0:
+		var progress: float = 1.0 - shadow_sweep_phase / shadow_sweep_duration
+		var envelope: float = sin(progress * PI)
+		intensity = shadow_sweep_intensity * envelope
+		car_shadow_material.set_shader_parameter("shadow_offset", shadow_sweep_start.lerp(shadow_sweep_end, progress))
+	_set_car_shadow_intensity(intensity)
+
+func _start_shadow_sweep() -> void:
+	if cloud_textures.is_empty() or car_shadow_material == null:
+		return
+	shadow_sweep_duration = road_bump_rng.randf_range(0.58, 1.55)
+	shadow_sweep_phase = shadow_sweep_duration
+	shadow_sweep_intensity = road_bump_rng.randf_range(0.16, 0.36)
+	shadow_sweep_angle = road_bump_rng.randf_range(-1.15, 1.15)
+	var travel_dir: Vector2 = Vector2.RIGHT.rotated(road_bump_rng.randf_range(-0.85, 0.85))
+	var uv_span: float = road_bump_rng.randf_range(0.62, 1.05)
+	var side_offset: float = road_bump_rng.randf_range(-0.20, 0.20)
+	shadow_sweep_start = Vector2(0.5, 0.5) - travel_dir * uv_span + travel_dir.orthogonal() * side_offset
+	shadow_sweep_end = Vector2(0.5, 0.5) + travel_dir * uv_span + travel_dir.orthogonal() * road_bump_rng.randf_range(-0.20, 0.20)
+	shadow_sweep_texture_scale = road_bump_rng.randf_range(0.36, 0.82)
+	car_shadow_material.set_shader_parameter("shadow_texture", cloud_textures[road_bump_rng.randi_range(0, cloud_textures.size() - 1)])
+	car_shadow_material.set_shader_parameter("shadow_angle", shadow_sweep_angle)
+	car_shadow_material.set_shader_parameter("shadow_scale", shadow_sweep_texture_scale)
+	car_shadow_material.set_shader_parameter("shadow_offset", shadow_sweep_start)
+
+func _set_car_shadow_intensity(intensity: float) -> void:
+	car_shadow_sprite.visible = intensity > 0.01
+	car_shadow_material.set_shader_parameter("shadow_intensity", intensity)
+
+func _build_rain_splash_textures() -> void:
+	if not rain_splash_textures.is_empty():
+		return
+	for variant in range(5):
+		rain_splash_textures.append(_make_rain_splash_texture(variant))
+
+func _make_rain_splash_texture(variant: int) -> Texture2D:
+	var texture_size := 96
+	var image := Image.create(texture_size, texture_size, false, Image.FORMAT_RGBA8)
+	var center := Vector2(texture_size * 0.5, texture_size * 0.5)
+	for y in range(texture_size):
+		for x in range(texture_size):
+			var offset := Vector2(x, y) - center
+			var distance: float = offset.length()
+			var angle: float = atan2(offset.y, offset.x)
+			var alpha: float = 0.0
+			alpha += _ring_alpha(distance, 22.0 + variant * 1.4, 1.5)
+			alpha += _ring_alpha(distance, 32.0 - variant * 1.1, 1.7) * 0.65
+			alpha += _ring_alpha(distance, 12.0 + variant, 1.35) * 0.38
+			var broken: float = 0.55 + 0.45 * sin(angle * float(variant + 3) + distance * 0.19)
+			var sparkle: float = 0.0
+			for spoke in range(4):
+				var spoke_angle: float = TAU * float(spoke) / 4.0 + variant * 0.31
+				var spoke_diff: float = abs(wrapf(angle - spoke_angle, -PI, PI))
+				sparkle = max(sparkle, max(0.0, 1.0 - spoke_diff / 0.08) * max(0.0, 1.0 - distance / 38.0))
+			alpha = min(1.0, alpha * broken + sparkle * 0.34)
+			image.set_pixel(x, y, Color(1.0, 1.0, 1.0, alpha))
+	return ImageTexture.create_from_image(image)
+
+func _ring_alpha(distance: float, radius: float, width: float) -> float:
+	return exp(-pow((distance - radius) / max(0.1, width), 2.0))
 
 func _hash01(value: int) -> float:
 	return fposmod(sin(float(value) * 12.9898) * 43758.5453, 1.0)

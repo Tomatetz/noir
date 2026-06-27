@@ -14,7 +14,6 @@ func _draw() -> void:
 	if map == null or map.game == null:
 		return
 	_draw_rain()
-	_draw_rain_impacts()
 	_draw_route_overlay()
 	_draw_destination_overlay()
 	_draw_hover_card()
@@ -44,10 +43,10 @@ func _draw_rain() -> void:
 		var length: float = lerp(10.0, 70.0, pow(h5, 1.75))
 		var end := start - rain_direction * length
 		var headlight_factor: float = _screen_headlight_factor((start + end) * 0.5)
-		var alpha: float = lerp(0.025, 0.085, h3) + headlight_factor * lerp(0.06, 0.16, h5)
+		var alpha: float = lerp(0.040, 0.120, h3) + headlight_factor * lerp(0.09, 0.22, h5)
 		var rain_color: Color = Color("#d8eeee").lerp(Color("#caffd7"), min(0.75, headlight_factor))
-		rain_color.a = min(alpha, 0.28)
-		draw_line(start, end, rain_color, lerp(0.35, 0.85, headlight_factor), true)
+		rain_color.a = min(alpha, 0.34)
+		draw_line(start, end, rain_color, lerp(0.42, 0.95, headlight_factor), true)
 
 func _draw_route_overlay() -> void:
 	if map.current_route_points.size() < 2:
@@ -128,36 +127,6 @@ func _screen_headlight_factor(screen_pos: Vector2) -> float:
 	var cone: float = clamp(1.0 - lateral / spread, 0.0, 1.0)
 	var distance_fade: float = clamp(1.0 - along / 620.0, 0.0, 1.0)
 	return pow(cone, 1.2) * pow(distance_fade, 0.6)
-
-func _draw_rain_impacts() -> void:
-	for impact in map.rain_impacts:
-		var age: float = float(impact["age"])
-		var life: float = max(0.01, float(impact["life"]))
-		var t: float = clamp(age / life, 0.0, 1.0)
-		var world_pos: Vector2 = impact["world_pos"]
-		var screen_pos: Vector2 = map._to_screen(world_pos)
-		if not Rect2(Vector2(-32.0, -32.0), size + Vector2(64.0, 64.0)).has_point(screen_pos):
-			continue
-		var light_factor: float = max(float(impact["light"]), map._headlight_weather_factor(world_pos))
-		var radius: float = lerp(1.5, float(impact["radius"]), t)
-		var fade: float = pow(1.0 - t, 1.05)
-		var color: Color = Color("#d6f3f4").lerp(Color("#e6ffe3"), min(0.9, light_factor))
-		color.a = fade * lerp(0.72, 1.0, light_factor)
-		var seed: int = int(impact["seed"])
-		var start_angle: float = map._hash01(seed) * TAU
-		var arc_len: float = lerp(2.4, 5.2, map._hash01(seed + 17))
-		draw_circle(screen_pos, max(1.8, radius * 0.24), Color(color.r, color.g, color.b, color.a * 0.42))
-		draw_arc(screen_pos, radius, start_angle, start_angle + arc_len, 18, color, lerp(1.8, 3.2, light_factor), true)
-		draw_arc(screen_pos, radius * 0.58, start_angle + 0.8, start_angle + arc_len * 0.72 + 0.8, 12, Color(color.r, color.g, color.b, color.a * 0.54), lerp(1.0, 2.0, light_factor), true)
-		for j in range(3):
-			var spoke_angle: float = start_angle + TAU * map._hash01(seed + j * 29 + 101)
-			var spoke_dir := Vector2.RIGHT.rotated(spoke_angle)
-			var spoke_len: float = radius * lerp(0.42, 0.86, map._hash01(seed + j * 31 + 113))
-			var spoke_color := Color(color.r, color.g, color.b, color.a * 0.68)
-			draw_line(screen_pos + spoke_dir * radius * 0.12, screen_pos + spoke_dir * spoke_len, spoke_color, lerp(1.0, 1.8, light_factor), true)
-		var glint_color := Color("#f1ffe8", fade * lerp(0.28, 0.84, light_factor))
-		draw_line(screen_pos + Vector2(-radius * 0.90, 0.0), screen_pos + Vector2(radius * 0.90, 0.0), glint_color, 1.25, true)
-		draw_line(screen_pos + Vector2(0.0, -radius * 0.38), screen_pos + Vector2(0.0, radius * 0.38), Color(glint_color.r, glint_color.g, glint_color.b, glint_color.a * 0.58), 0.9, true)
 
 func _draw_hover_card() -> void:
 	if map.hovered_district == -1:
