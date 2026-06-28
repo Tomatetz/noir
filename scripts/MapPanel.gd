@@ -61,6 +61,7 @@ var player_laser_trace_line: Line2D
 var player_laser_line: Line2D
 var player_laser_light: PointLight2D
 var player_laser_lights: Array[PointLight2D] = []
+var player_missile_root: Node2D
 var weapon_range_light: PointLight2D
 var weapon_range_lights: Array[PointLight2D] = []
 var impact_spark_root: Node2D
@@ -116,6 +117,7 @@ var camera_offset := Vector2.ZERO
 var hovered_district := -1
 var hover_screen_pos := Vector2.ZERO
 var minimap_rect := Rect2()
+var pirate_debug_button_rect := Rect2()
 var fullscreen_view := false
 var centered_initially := false
 var minimap_dragging := false
@@ -158,7 +160,13 @@ var player_weapon_cooldown := 0.0
 var player_weapon_rate := 1.45
 var player_weapon_damage_min := 5
 var player_weapon_damage_max := 9
-var player_weapon_range := 540.0
+var player_weapon_range := 360.0
+var player_missile_cooldown := 1.4
+var player_missile_rate := 4.6
+var player_missile_range := 500.0
+var player_missile_damage_min := 10
+var player_missile_damage_max := 16
+var player_missiles: Array[Dictionary] = []
 var player_fire_phase := 0.0
 var player_fire_duration := 0.0
 var player_laser_start := Vector2.ZERO
@@ -212,6 +220,10 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
 		var local_mouse := get_local_mouse_position()
 		if not Rect2(Vector2.ZERO, size).has_point(local_mouse):
+			return
+		if not fullscreen_view and pirate_debug_button_rect.has_point(local_mouse):
+			_spawn_debug_pirate()
+			get_viewport().set_input_as_handled()
 			return
 		if _is_weapon_hud_zone(local_mouse):
 			get_viewport().set_input_as_handled()
@@ -711,6 +723,11 @@ func _setup_pirate_node() -> void:
 		player_laser_root.add_child(player_light)
 		player_laser_lights.append(player_light)
 
+	player_missile_root = Node2D.new()
+	player_missile_root.z_index = 54
+	player_missile_root.z_as_relative = false
+	add_child(player_missile_root)
+
 	weapon_range_light = PointLight2D.new()
 	weapon_range_light.texture = _make_radial_light_texture(Color.WHITE)
 	weapon_range_light.color = player_laser_color
@@ -1023,6 +1040,7 @@ func _process(delta: float) -> void:
 	_update_impact_sparks(delta)
 	_update_player_weapon(delta)
 	_update_player_laser(delta)
+	_update_player_missiles(delta)
 	_update_rain_impacts(delta)
 	_update_wheel_sprays(delta)
 	_update_shadow_sweep(delta)
@@ -1071,6 +1089,10 @@ func _gui_input(event: InputEvent) -> void:
 		if minimap_dragging:
 			_center_from_minimap(event.position)
 			queue_redraw()
+		elif not fullscreen_view and pirate_debug_button_rect.has_point(event.position):
+			hovered_district = -1
+			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+			queue_redraw()
 		elif minimap_rect.has_point(event.position) and not fullscreen_view:
 			hovered_district = -1
 			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
@@ -1081,7 +1103,9 @@ func _gui_input(event: InputEvent) -> void:
 
 
 func _handle_left_click(local_pos: Vector2) -> void:
-	if minimap_rect.has_point(local_pos) and not fullscreen_view:
+	if not fullscreen_view and pirate_debug_button_rect.has_point(local_pos):
+		_spawn_debug_pirate()
+	elif minimap_rect.has_point(local_pos) and not fullscreen_view:
 		minimap_dragging = true
 		_center_from_minimap(local_pos)
 	elif hovered_district != -1:
@@ -1097,9 +1121,27 @@ func _is_active_map_view() -> bool:
 	return game.fullscreen_map_panel == null or not game.fullscreen_map_panel.visible
 
 func _is_weapon_hud_zone(local_pos: Vector2) -> bool:
-	var slot_center := Vector2(58.0, max(88.0, size.y - 74.0))
-	var rect := Rect2(slot_center - Vector2(48.0, 44.0), Vector2(176.0, 88.0))
+	var slot_center := _weapon_slot_center(0)
+	var rect := Rect2(slot_center - Vector2(48.0, 44.0), Vector2(224.0, 88.0))
 	return rect.has_point(local_pos)
+
+func _weapon_slot_center(index: int) -> Vector2:
+	return Vector2(58.0 + float(index) * 58.0, max(88.0, size.y - 74.0))
+
+func _hovered_weapon_index() -> int:
+	var mouse_pos: Vector2 = get_local_mouse_position()
+	for i in range(2):
+		var center: Vector2 = _weapon_slot_center(i)
+		var rect := Rect2(center - Vector2(30.0, 30.0), Vector2(60.0, 60.0))
+		if rect.has_point(mouse_pos):
+			return i
+	return -1
+
+func _hovered_weapon_range() -> float:
+	return player_missile_range if _hovered_weapon_index() == 1 else player_weapon_range
+
+func _hovered_weapon_color() -> Color:
+	return Color("#ffcf5a") if _hovered_weapon_index() == 1 else player_laser_color
 
 func _center_from_minimap(local_pos: Vector2) -> void:
 	var map_size := minimap_rect.size
@@ -1521,14 +1563,7 @@ func _update_pirate(delta: float) -> void:
 		_despawn_pirate()
 		return
 	if not pirate_active:
-		if not game.is_traveling:
-			return
-		pirate_spawn_timer -= delta
-		if pirate_spawn_timer <= 0.0:
-			if road_bump_rng.randf() < 0.45:
-				_spawn_pirate()
-			pirate_spawn_timer = road_bump_rng.randf_range(12.0, 26.0)
-			return
+		return
 	pirate_root.visible = true
 	_update_pirate_motion(delta)
 	if not pirate_active:
@@ -1551,9 +1586,16 @@ func _spawn_pirate() -> void:
 	pirate_fire_timer = road_bump_rng.randf_range(1.2, 3.0)
 	pirate_fire_phase = 0.0
 	player_weapon_cooldown = road_bump_rng.randf_range(0.35, 0.95)
+	player_missile_cooldown = road_bump_rng.randf_range(1.0, 2.1)
 	pirate_active = true
 	pirate_root.visible = true
 	_update_pirate_node()
+
+func _spawn_debug_pirate() -> void:
+	if game == null or pirate_root == null or game.at_location:
+		return
+	_despawn_pirate()
+	_spawn_pirate()
 
 func _random_laser_color() -> Color:
 	var colors := [
@@ -1668,13 +1710,19 @@ func _update_pirate_laser(delta: float) -> void:
 func _update_player_weapon(delta: float) -> void:
 	if not pirate_active or pirate_root == null or not pirate_root.visible:
 		player_weapon_cooldown = 0.0
+		player_missile_cooldown = 0.0
 		return
 	if player_fire_phase > 0.0:
-		return
-	player_weapon_cooldown -= delta
-	if player_weapon_cooldown <= 0.0:
-		_start_player_weapon_fire()
-		player_weapon_cooldown = player_weapon_rate + road_bump_rng.randf_range(-0.22, 0.38)
+		player_weapon_cooldown = max(player_weapon_cooldown - delta, 0.0)
+	else:
+		player_weapon_cooldown -= delta
+		if player_weapon_cooldown <= 0.0 and game.player_pos.distance_to(pirate_pos) <= player_weapon_range:
+			_start_player_weapon_fire()
+			player_weapon_cooldown = player_weapon_rate + road_bump_rng.randf_range(-0.22, 0.38)
+	player_missile_cooldown -= delta
+	if player_missile_cooldown <= 0.0 and game.player_pos.distance_to(pirate_pos) <= player_missile_range:
+		_fire_player_missile_salvo()
+		player_missile_cooldown = player_missile_rate + road_bump_rng.randf_range(-0.35, 0.75)
 
 func _start_player_weapon_fire() -> void:
 	if not pirate_active or player_laser_root == null:
@@ -1690,20 +1738,23 @@ func _start_player_weapon_fire() -> void:
 func _update_weapon_range_light() -> void:
 	if weapon_range_light == null or game == null:
 		return
-	var hovered: bool = _is_weapon_hud_zone(get_local_mouse_position())
+	var hovered_index: int = _hovered_weapon_index()
+	var hovered: bool = hovered_index != -1
+	var weapon_range: float = _hovered_weapon_range()
+	var weapon_color: Color = _hovered_weapon_color()
 	weapon_range_light.position = _to_screen(game.player_pos)
-	weapon_range_light.color = player_laser_color
-	weapon_range_light.texture_scale = player_weapon_range / 64.0
-	var target_energy: float = 0.08 if hovered else 0.0
+	weapon_range_light.color = weapon_color
+	weapon_range_light.texture_scale = weapon_range / 60.0
+	var target_energy: float = 0.18 if hovered else 0.0
 	weapon_range_light.energy = lerp(weapon_range_light.energy, target_energy, 0.18)
 	var spin: float = Time.get_ticks_msec() * 0.00018
 	for i in range(weapon_range_lights.size()):
 		var range_light: PointLight2D = weapon_range_lights[i]
 		var angle: float = spin + TAU * float(i) / float(weapon_range_lights.size())
-		range_light.position = _to_screen(game.player_pos + Vector2(cos(angle), sin(angle)) * player_weapon_range)
-		range_light.color = player_laser_color
-		range_light.texture_scale = 1.45
-		range_light.energy = lerp(range_light.energy, 0.44 if hovered else 0.0, 0.18)
+		range_light.position = _to_screen(game.player_pos + Vector2(cos(angle), sin(angle)) * weapon_range)
+		range_light.color = weapon_color
+		range_light.texture_scale = 2.05
+		range_light.energy = lerp(range_light.energy, 0.86 if hovered else 0.0, 0.18)
 
 func _update_player_laser(delta: float) -> void:
 	if player_laser_root == null:
@@ -1766,6 +1817,183 @@ func _update_player_laser(delta: float) -> void:
 		laser_light.position = _to_screen(_sample_points_curve(player_laser_points, player_laser_start, player_laser_end, t))
 		laser_light.energy = 0.9 + curve_alpha * 1.7
 		laser_light.texture_scale = 1.35 + curve_alpha * 0.65
+
+func _fire_player_missile_salvo() -> void:
+	if not pirate_active or player_missile_root == null or game == null:
+		return
+	var to_target: Vector2 = pirate_pos - game.player_pos
+	if to_target.length() > player_missile_range:
+		return
+	var forward: Vector2 = to_target.normalized() if to_target.length() > 0.01 else Vector2.RIGHT.rotated(game.vehicle_angle)
+	var side: Vector2 = forward.orthogonal()
+	for i in range(2):
+		var side_sign: float = -1.0 if i == 0 else 1.0
+		var start: Vector2 = game.player_pos + forward * 32.0 + side * side_sign * 13.0
+		var target: Vector2 = pirate_pos + side * road_bump_rng.randf_range(-14.0, 14.0)
+		var distance: float = start.distance_to(target)
+		var control: Vector2 = start.lerp(target, 0.48) + side * side_sign * clamp(distance * road_bump_rng.randf_range(0.22, 0.38), 70.0, 210.0)
+		control += forward * road_bump_rng.randf_range(-40.0, 55.0)
+		_spawn_player_missile(start, target, control, side_sign, float(i) * road_bump_rng.randf_range(0.16, 0.24))
+
+func _spawn_player_missile(start: Vector2, target: Vector2, control: Vector2, side_sign: float, launch_delay: float) -> void:
+	var color := Color("#ffcf5a").lerp(Color("#ff7a2f"), road_bump_rng.randf_range(0.0, 0.32))
+	var exhaust_color := Color("#ff4a1f").lerp(Color("#ff9a2b"), road_bump_rng.randf_range(0.0, 0.45))
+	var missile_node := Node2D.new()
+	missile_node.z_index = 4
+	missile_node.visible = launch_delay <= 0.0
+	player_missile_root.add_child(missile_node)
+	var body := Polygon2D.new()
+	body.polygon = PackedVector2Array([
+		Vector2(9.0, 0.0),
+		Vector2(-6.0, -3.6),
+		Vector2(-3.0, 0.0),
+		Vector2(-6.0, 3.6)
+	])
+	body.color = color.lightened(0.12)
+	var body_material := CanvasItemMaterial.new()
+	body_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	body.material = body_material
+	missile_node.add_child(body)
+	var trail_glow := _make_laser_line(10.0, _color_with_alpha(color, 0.0))
+	var trail_core := _make_laser_line(2.0, _color_with_alpha(color.lightened(0.38), 0.0))
+	var exhaust_glow := _make_laser_line(15.0, _color_with_alpha(exhaust_color, 0.0))
+	player_missile_root.add_child(trail_glow)
+	player_missile_root.add_child(trail_core)
+	player_missile_root.add_child(exhaust_glow)
+	var light := PointLight2D.new()
+	light.texture = _make_radial_light_texture(Color.WHITE)
+	light.color = color
+	light.energy = 1.5
+	light.texture_scale = 1.35
+	player_missile_root.add_child(light)
+	var exhaust_light := PointLight2D.new()
+	exhaust_light.texture = _make_radial_light_texture(Color.WHITE)
+	exhaust_light.color = exhaust_color
+	exhaust_light.energy = 0.0
+	exhaust_light.texture_scale = 1.7
+	player_missile_root.add_child(exhaust_light)
+	var life: float = clamp(start.distance_to(target) / 280.0, 0.85, 1.85)
+	player_missiles.append({
+		"node": missile_node,
+		"trail_glow": trail_glow,
+		"trail_core": trail_core,
+		"exhaust_glow": exhaust_glow,
+		"light": light,
+		"exhaust_light": exhaust_light,
+		"start": start,
+		"target": target,
+		"control": control,
+		"side": side_sign,
+		"age": -launch_delay,
+		"life": life,
+		"history": [],
+		"damage": road_bump_rng.randi_range(player_missile_damage_min, player_missile_damage_max),
+		"color": color,
+		"exhaust_color": exhaust_color,
+		"last_pos": start,
+		"last_direction": Vector2.RIGHT.rotated(game.vehicle_angle)
+	})
+
+func _update_player_missiles(delta: float) -> void:
+	if player_missiles.is_empty():
+		return
+	for i in range(player_missiles.size() - 1, -1, -1):
+		var missile: Dictionary = player_missiles[i]
+		if not pirate_active or pirate_root == null or not pirate_root.visible:
+			_free_player_missile(missile)
+			player_missiles.remove_at(i)
+			continue
+		var age: float = float(missile["age"]) + delta
+		var life: float = max(0.01, float(missile["life"]))
+		missile["age"] = age
+		if age < 0.0:
+			_set_missile_visible(missile, false)
+			player_missiles[i] = missile
+			continue
+		_set_missile_visible(missile, true)
+		missile["target"] = pirate_pos
+		var t: float = clamp(age / life, 0.0, 1.0)
+		var eased_t: float = 1.0 - pow(1.0 - t, 1.8)
+		var pos: Vector2 = _sample_missile_curve(missile, eased_t)
+		var next_pos: Vector2 = _sample_missile_curve(missile, min(1.0, eased_t + 0.018))
+		var direction: Vector2 = (next_pos - pos).normalized() if next_pos.distance_to(pos) > 0.01 else Vector2.RIGHT.rotated(game.vehicle_angle)
+		missile["last_pos"] = pos
+		missile["last_direction"] = direction
+		var history: Array = missile["history"]
+		history.append(pos)
+		while history.size() > 12:
+			history.pop_front()
+		missile["history"] = history
+		var node: Node2D = missile["node"] as Node2D
+		if is_instance_valid(node):
+			node.position = _to_screen(pos)
+			node.rotation = direction.angle()
+			node.scale = Vector2.ONE * lerp(0.88, 1.08, sin(t * PI))
+		var trail_points := PackedVector2Array()
+		for history_pos in history:
+			trail_points.append(_to_screen(history_pos))
+		var color: Color = missile["color"]
+		var exhaust_color: Color = missile["exhaust_color"]
+		var trail_glow: Line2D = missile["trail_glow"] as Line2D
+		var trail_core: Line2D = missile["trail_core"] as Line2D
+		var exhaust_glow: Line2D = missile["exhaust_glow"] as Line2D
+		var trail_alpha: float = sin(t * PI)
+		if is_instance_valid(trail_glow):
+			trail_glow.points = trail_points
+			trail_glow.default_color = _color_with_alpha(color, 0.18 * trail_alpha)
+		if is_instance_valid(trail_core):
+			trail_core.points = trail_points
+			trail_core.default_color = _color_with_alpha(color.lightened(0.35), 0.82 * trail_alpha)
+		var exhaust_start: Vector2 = pos - direction * 8.0
+		var exhaust_end: Vector2 = pos - direction * (44.0 + 12.0 * sin(Time.get_ticks_msec() * 0.024 + float(missile["side"])))
+		if is_instance_valid(exhaust_glow):
+			exhaust_glow.points = PackedVector2Array([_to_screen(exhaust_end), _to_screen(exhaust_start)])
+			exhaust_glow.width = 12.0 + 3.5 * trail_alpha
+			exhaust_glow.default_color = _color_with_alpha(exhaust_color, 0.22 + trail_alpha * 0.24)
+		var light: PointLight2D = missile["light"] as PointLight2D
+		if is_instance_valid(light):
+			light.position = _to_screen(pos)
+			light.energy = 1.1 + trail_alpha * 1.5
+			light.texture_scale = 1.1 + trail_alpha * 0.65
+		var exhaust_light: PointLight2D = missile["exhaust_light"] as PointLight2D
+		if is_instance_valid(exhaust_light):
+			exhaust_light.position = _to_screen(pos - direction * 28.0)
+			exhaust_light.energy = 1.2 + trail_alpha * 1.8
+			exhaust_light.texture_scale = 1.35 + trail_alpha * 1.0
+		var hit: bool = t >= 1.0 or pos.distance_to(pirate_pos) < 28.0
+		if hit:
+			var damage_amount: int = int(missile["damage"])
+			pirate_hull = clampi(pirate_hull - damage_amount, 0, 100)
+			_spawn_damage_popup(damage_amount, pirate_pos, clamp(float(pirate_hull) / 100.0, 0.0, 1.0))
+			_spawn_impact_sparks(pirate_pos, color, 34)
+			_free_player_missile(missile)
+			player_missiles.remove_at(i)
+			if pirate_hull <= 0:
+				_spawn_vehicle_explosion(pirate_pos)
+				_despawn_pirate()
+				return
+		else:
+			player_missiles[i] = missile
+
+func _sample_missile_curve(missile: Dictionary, t: float) -> Vector2:
+	var start: Vector2 = missile["start"]
+	var control: Vector2 = missile["control"]
+	var target: Vector2 = missile["target"]
+	var a: Vector2 = start.lerp(control, t)
+	var b: Vector2 = control.lerp(target, t)
+	return a.lerp(b, t)
+
+func _free_player_missile(missile: Dictionary) -> void:
+	for key in ["node", "trail_glow", "trail_core", "exhaust_glow", "light", "exhaust_light"]:
+		var item: Node = missile.get(key, null) as Node
+		if is_instance_valid(item):
+			item.queue_free()
+
+func _set_missile_visible(missile: Dictionary, visible: bool) -> void:
+	for key in ["node", "trail_glow", "trail_core", "exhaust_glow", "light", "exhaust_light"]:
+		var item: Node = missile.get(key, null) as Node
+		if is_instance_valid(item):
+			item.visible = visible
 
 func _spawn_impact_sparks(world_pos: Vector2, color: Color, count: int) -> void:
 	if impact_spark_root == null:
@@ -1960,6 +2188,7 @@ func _despawn_pirate() -> void:
 	pirate_laser_points.clear()
 	player_fire_phase = 0.0
 	player_weapon_cooldown = 0.0
+	player_missile_cooldown = 0.0
 	player_laser_damage_applied = false
 	player_laser_points.clear()
 	pirate_pos = Vector2(-10000.0, -10000.0)
@@ -1978,6 +2207,9 @@ func _despawn_pirate() -> void:
 		player_laser_light.energy = 0.0
 	for laser_light in player_laser_lights:
 		laser_light.energy = 0.0
+	for missile in player_missiles:
+		_free_player_missile(missile)
+	player_missiles.clear()
 	if pirate_health_bar_root != null:
 		pirate_health_bar_root.visible = false
 
@@ -2331,19 +2563,22 @@ func _update_cloud_visibility(delta: float) -> void:
 		var health_light_factor: float = _health_cloud_light_factor(sprite.position)
 		var weapon_range_light_factor: float = _weapon_range_cloud_light_factor(sprite.position)
 		var laser_light_factor: float = _laser_cloud_light_factor(sprite.position)
+		var missile_light_factor: float = _missile_cloud_light_factor(sprite.position)
 		var destination_light_factor: float = _destination_cloud_light_factor(sprite.position)
 		var target_alpha: float = max_alpha * fade_in * lerp(1.0, 1.34, light_factor)
 		target_alpha *= lerp(1.0, 1.04, route_light_factor)
 		target_alpha *= lerp(1.0, 1.65, health_light_factor)
 		target_alpha *= lerp(1.0, 1.22, weapon_range_light_factor)
 		target_alpha *= lerp(1.0, 1.85, laser_light_factor)
+		target_alpha *= lerp(1.0, 1.45, missile_light_factor)
 		target_alpha *= lerp(1.0, 1.50, destination_light_factor)
 		target_alpha = min(target_alpha, 0.95)
 		var target_tint: Color = Color(0.88, 0.96, 0.98, 1.0).lerp(Color(1.0, 0.72, 0.36, 1.0), light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.44, 1.0, 0.66, 1.0), route_light_factor * 0.12)
 		target_tint = target_tint.lerp(Color(0.36, 1.0, 0.56, 1.0), health_light_factor)
-		target_tint = target_tint.lerp(player_laser_color.lightened(0.18), weapon_range_light_factor * 0.42)
+		target_tint = target_tint.lerp(_hovered_weapon_color().lightened(0.18), weapon_range_light_factor * 0.58)
 		target_tint = target_tint.lerp(_color_with_alpha(_laser_cloud_color(sprite.position).lightened(0.25), 1.0), laser_light_factor)
+		target_tint = target_tint.lerp(_missile_cloud_color(sprite.position).lightened(0.22), missile_light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.92, 1.0, 0.86, 1.0), destination_light_factor)
 		var color: Color = sprite.modulate
 		var tint_lerp: float = clamp(delta * 2.4, 0.0, 1.0)
@@ -2454,13 +2689,14 @@ func _health_cloud_light_factor(world_pos: Vector2) -> float:
 	return pow(raw_light, 1.05) * lerp(0.65, 1.0, health_ratio)
 
 func _weapon_range_cloud_light_factor(world_pos: Vector2) -> float:
-	if game == null or not _is_weapon_hud_zone(get_local_mouse_position()):
+	if game == null or _hovered_weapon_index() == -1:
 		return 0.0
+	var weapon_range: float = _hovered_weapon_range()
 	var distance: float = world_pos.distance_to(game.player_pos)
-	var ring_distance: float = abs(distance - player_weapon_range)
-	var ring_light: float = clamp(1.0 - ring_distance / 170.0, 0.0, 1.0)
-	var inner_haze: float = clamp(1.0 - distance / player_weapon_range, 0.0, 1.0) * 0.14
-	return min(pow(ring_light, 1.35) * 0.86 + inner_haze, 0.94)
+	var ring_distance: float = abs(distance - weapon_range)
+	var ring_light: float = clamp(1.0 - ring_distance / 190.0, 0.0, 1.0)
+	var inner_haze: float = clamp(1.0 - distance / weapon_range, 0.0, 1.0) * 0.24
+	return min(pow(ring_light, 1.22) * 1.15 + inner_haze, 1.0)
 
 func _destination_cloud_light_factor(world_pos: Vector2) -> float:
 	if game == null or not game.is_traveling:
@@ -2478,6 +2714,35 @@ func _laser_cloud_color(world_pos: Vector2) -> Color:
 	var pirate_factor: float = _laser_points_cloud_light(pirate_laser_points, pirate_fire_phase, pirate_fire_duration, world_pos)
 	var player_factor: float = _laser_points_cloud_light(player_laser_points, player_fire_phase, player_fire_duration, world_pos)
 	return player_laser_color if player_factor > pirate_factor else pirate_laser_color
+
+func _missile_cloud_light_factor(world_pos: Vector2) -> float:
+	var best: float = 0.0
+	for missile in player_missiles:
+		if float(missile.get("age", 0.0)) < 0.0:
+			continue
+		var pos: Vector2 = missile.get("last_pos", missile.get("start", Vector2.ZERO))
+		var direction: Vector2 = missile.get("last_direction", Vector2.RIGHT)
+		var exhaust_pos: Vector2 = pos - direction.normalized() * 32.0
+		var distance: float = world_pos.distance_to(exhaust_pos)
+		var raw_light: float = clamp(1.0 - distance / 270.0, 0.0, 1.0)
+		best = max(best, pow(raw_light, 1.2))
+	return best
+
+func _missile_cloud_color(world_pos: Vector2) -> Color:
+	var best: float = -1.0
+	var best_color := Color("#ff6a24")
+	for missile in player_missiles:
+		if float(missile.get("age", 0.0)) < 0.0:
+			continue
+		var pos: Vector2 = missile.get("last_pos", missile.get("start", Vector2.ZERO))
+		var direction: Vector2 = missile.get("last_direction", Vector2.RIGHT)
+		var exhaust_pos: Vector2 = pos - direction.normalized() * 32.0
+		var distance: float = world_pos.distance_to(exhaust_pos)
+		var raw_light: float = clamp(1.0 - distance / 270.0, 0.0, 1.0)
+		if raw_light > best:
+			best = raw_light
+			best_color = missile.get("exhaust_color", best_color)
+	return best_color
 
 func _laser_points_cloud_light(points: Array[Vector2], phase: float, duration: float, world_pos: Vector2) -> float:
 	if phase <= 0.0 or points.size() < 2:

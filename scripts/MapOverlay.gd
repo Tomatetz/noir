@@ -170,15 +170,17 @@ func _draw_hover_card() -> void:
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 96), "Безопасность %d  Вычисления %d" % [d.security, d.compute], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
 
 func _draw_weapon_hud() -> void:
-	var slot_center := _weapon_slot_center()
+	_draw_weapon_slot(0, "Лазер", map.player_laser_color, map.player_weapon_cooldown, map.player_weapon_rate, map.player_fire_phase > 0.0)
+	_draw_weapon_slot(1, "Ракеты", Color("#ffcf5a"), map.player_missile_cooldown, map.player_missile_rate, false)
+
+func _draw_weapon_slot(index: int, label: String, weapon_color: Color, cooldown: float, rate: float, firing: bool) -> void:
+	var slot_center := _weapon_slot_center(index)
 	var radius := 18.0
 	var slot_rect := Rect2(slot_center - Vector2(radius + 12.0, radius + 12.0), Vector2(radius + 12.0, radius + 12.0) * 2.0)
 	var hovered: bool = slot_rect.has_point(get_local_mouse_position())
-	var weapon_color: Color = map.player_laser_color
 	var ready_ratio: float = 1.0
-	if map.player_weapon_cooldown > 0.0:
-		ready_ratio = clamp(1.0 - map.player_weapon_cooldown / max(0.01, map.player_weapon_rate), 0.0, 1.0)
-	var firing: bool = map.player_fire_phase > 0.0
+	if cooldown > 0.0:
+		ready_ratio = clamp(1.0 - cooldown / max(0.01, rate), 0.0, 1.0)
 	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.018)
 	var glow_alpha: float = 0.08 + pow(ready_ratio, 1.7) * 0.24
 	if firing:
@@ -199,18 +201,40 @@ func _draw_weapon_hud() -> void:
 	draw_arc(slot_center, radius + 1.0, start_angle, end_angle, 48, Color(ring_color.r, ring_color.g, ring_color.b, ring_alpha), 2.5, true)
 	if firing:
 		draw_arc(slot_center, radius + 5.0, start_angle, start_angle + TAU * pulse, 48, Color(ring_color.r, ring_color.g, ring_color.b, 0.24), 2.0, true)
-	draw_line(slot_center + Vector2(-6.0, 4.0), slot_center + Vector2(6.0, -4.0), Color("#f3ffff", 0.82), 1.5, true)
-	draw_line(slot_center + Vector2(-2.0, -8.0), slot_center + Vector2(2.0, 8.0), Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.75), 1.1, true)
-	draw_string(get_theme_default_font(), slot_center + Vector2(28.0, 5.0), "Лазер", HORIZONTAL_ALIGNMENT_LEFT, 90, 11, Color("#cfd8dc", 0.88))
+	if index == 0:
+		draw_line(slot_center + Vector2(-6.0, 4.0), slot_center + Vector2(6.0, -4.0), Color("#f3ffff", 0.82), 1.5, true)
+		draw_line(slot_center + Vector2(-2.0, -8.0), slot_center + Vector2(2.0, 8.0), Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.75), 1.1, true)
+	else:
+		var rocket_points := PackedVector2Array([
+			slot_center + Vector2(7.0, 0.0),
+			slot_center + Vector2(-6.0, -5.0),
+			slot_center + Vector2(-3.0, 0.0),
+			slot_center + Vector2(-6.0, 5.0)
+		])
+		draw_colored_polygon(rocket_points, Color("#fff4c5", 0.88))
+		draw_line(slot_center + Vector2(-8.0, 6.0), slot_center + Vector2(-14.0, 10.0), Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.58), 1.5, true)
+		draw_line(slot_center + Vector2(-8.0, -6.0), slot_center + Vector2(-14.0, -10.0), Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.58), 1.5, true)
+	if hovered:
+		_draw_weapon_tooltip(slot_center, label, weapon_color)
 
 func _draw_weapon_range_overlay() -> void:
-	if not _weapon_hud_rect().has_point(get_local_mouse_position()):
+	var hovered_index: int = _hovered_weapon_index()
+	if hovered_index == -1:
 		return
 	var center: Vector2 = map._to_screen(map.game.player_pos)
-	var weapon_color: Color = map.player_laser_color
-	var range_radius: float = map.player_weapon_range
-	draw_circle(center, range_radius, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.018))
+	var weapon_color: Color = map.player_laser_color if hovered_index == 0 else Color("#ffcf5a")
+	var range_radius: float = map.player_weapon_range if hovered_index == 0 else map.player_missile_range
+	draw_circle(center, range_radius, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.026))
+	draw_circle(center, range_radius * 0.74, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.020))
+	draw_circle(center, range_radius * 0.46, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.016))
 	_draw_dashed_circle(center, range_radius, weapon_color)
+
+func _draw_weapon_tooltip(slot_center: Vector2, text: String, color: Color) -> void:
+	var tooltip_pos := slot_center + Vector2(32.0, -12.0)
+	var tooltip_size := Vector2(82.0, 28.0)
+	draw_rect(Rect2(tooltip_pos, tooltip_size), Color("#071013", 0.88), true)
+	draw_rect(Rect2(tooltip_pos, tooltip_size), Color(color.r, color.g, color.b, 0.42), false, 1.0)
+	draw_string(get_theme_default_font(), tooltip_pos + Vector2(10.0, 19.0), text, HORIZONTAL_ALIGNMENT_LEFT, 68.0, 12, Color("#eafff4", 0.94))
 
 func _draw_location_name_labels() -> void:
 	for i in range(map.game.districts.size()):
@@ -293,12 +317,21 @@ func _fault_neon_color(base: Color, seed: int) -> Color:
 		candidate = palette[(index + 2) % palette.size()]
 	return candidate.lightened(0.12)
 
-func _weapon_slot_center() -> Vector2:
-	return Vector2(58.0, max(88.0, size.y - 74.0))
+func _weapon_slot_center(index: int) -> Vector2:
+	return Vector2(58.0 + float(index) * 58.0, max(88.0, size.y - 74.0))
+
+func _hovered_weapon_index() -> int:
+	var mouse_pos := get_local_mouse_position()
+	for i in range(2):
+		var center := _weapon_slot_center(i)
+		var rect := Rect2(center - Vector2(30.0, 30.0), Vector2(60.0, 60.0))
+		if rect.has_point(mouse_pos):
+			return i
+	return -1
 
 func _weapon_hud_rect() -> Rect2:
-	var center := _weapon_slot_center()
-	return Rect2(center - Vector2(48.0, 44.0), Vector2(176.0, 88.0))
+	var center := _weapon_slot_center(0)
+	return Rect2(center - Vector2(48.0, 44.0), Vector2(224.0, 88.0))
 
 func _draw_dashed_circle(center: Vector2, radius: float, color: Color) -> void:
 	var segments := 192
@@ -320,6 +353,7 @@ func _draw_minimap() -> void:
 	var map_size := Vector2(205, 136)
 	var pos := Vector2(size.x - map_size.x - 18, 18)
 	map.minimap_rect = Rect2(pos, map_size)
+	map.pirate_debug_button_rect = Rect2(pos + Vector2(0.0, map_size.y + 8.0), Vector2(38.0, 34.0))
 	draw_rect(Rect2(pos, map_size), Color("#0d1215", 0.88), true)
 	draw_rect(Rect2(pos, map_size), Color("#e7ecef", 0.25), false, 1.0)
 	var scale = min(map_size.x / map.WORLD_SIZE.x, map_size.y / map.WORLD_SIZE.y)
@@ -343,3 +377,22 @@ func _draw_minimap() -> void:
 	draw_rect(view_rect, Color("#f4f1de", 0.08), true)
 	draw_rect(view_rect, Color("#f4f1de", 0.80), false, 1.0)
 	draw_string(get_theme_default_font(), pos + Vector2(10, map_size.y - 10), "Перейти к точке", HORIZONTAL_ALIGNMENT_LEFT, 180, 11, Color("#cfd8dc"))
+	_draw_pirate_debug_button(map.pirate_debug_button_rect)
+
+func _draw_pirate_debug_button(button_rect: Rect2) -> void:
+	var hovered: bool = button_rect.has_point(get_local_mouse_position())
+	var accent := Color("#ff4a3d")
+	var bg_alpha: float = 0.90 if hovered else 0.76
+	var glow_alpha: float = 0.18 if hovered else 0.08
+	draw_rect(button_rect.grow(6.0), Color(accent.r, accent.g, accent.b, glow_alpha), true)
+	draw_rect(button_rect, Color("#0d1215", bg_alpha), true)
+	draw_rect(button_rect, Color(accent.r, accent.g, accent.b, 0.62 if hovered else 0.38), false, 1.2)
+	var center: Vector2 = button_rect.get_center()
+	draw_line(center + Vector2(-8.0, 0.0), center + Vector2(8.0, 0.0), Color("#ffd6d1", 0.92), 2.2, true)
+	draw_line(center + Vector2(0.0, -8.0), center + Vector2(0.0, 8.0), Color("#ffd6d1", 0.92), 2.2, true)
+	if hovered:
+		var tooltip_pos := button_rect.position + Vector2(46.0, 4.0)
+		var tooltip_size := Vector2(112.0, 26.0)
+		draw_rect(Rect2(tooltip_pos, tooltip_size), Color("#071013", 0.88), true)
+		draw_rect(Rect2(tooltip_pos, tooltip_size), Color(accent.r, accent.g, accent.b, 0.42), false, 1.0)
+		draw_string(get_theme_default_font(), tooltip_pos + Vector2(9.0, 18.0), "Добавить пирата", HORIZONTAL_ALIGNMENT_LEFT, 96.0, 11, Color("#ffe8e5"))
