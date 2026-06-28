@@ -26,6 +26,7 @@ const CITY_EXIT_START_OFFSET := 58.0
 const CITY_EXIT_DRIVE_DISTANCE := 115.0
 const MIN_FIELD_CLICK_DISTANCE := 78.0
 const WAYPOINT_PASS_RADIUS := 58.0
+const TURN_STEP_DISTANCE := 540.0
 const CITY_ENTRY_DIRECTIONS := [
 	Vector2.RIGHT,
 	Vector2(0.70710678, 0.70710678),
@@ -57,6 +58,8 @@ var vehicle_angle := 0.0
 var vehicle_target_angle := 0.0
 var at_location := true
 var is_traveling := false
+var combat_mode := false
+var advance_one_turn := false
 var travel_from := -1
 var travel_to := -1
 var travel_target_district := -1
@@ -244,6 +247,10 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		else:
 			_open_pause_menu()
+			get_viewport().set_input_as_handled()
+	elif event is InputEventKey and event.pressed and event.keycode == KEY_SPACE:
+		if is_traveling:
+			_pause_travel_turn(false)
 			get_viewport().set_input_as_handled()
 
 func _build_dashboard() -> void:
@@ -886,6 +893,7 @@ func _travel(target: int, enter_after_arrival := false) -> void:
 func _travel_to_point(target_pos: Vector2, target_district := -1, destination_name := "точка маршрута", enter_after_arrival := false, suppress_arrival_event := false) -> void:
 	if not target_pos.is_finite():
 		return
+	var wait_for_play: bool = combat_mode
 	var cost = _movement_cost(player_pos, target_pos)
 	if suppress_arrival_event:
 		cost = {}
@@ -898,7 +906,8 @@ func _travel_to_point(target_pos: Vector2, target_district := -1, destination_na
 	travel_target_district = target_district
 	travel_start_pos = player_pos
 	travel_final_pos = target_pos
-	travel_waypoints = _build_travel_waypoints(player_pos, target_pos, target_district)
+	var route_waypoints: Array[Vector2] = _build_travel_waypoints(player_pos, target_pos, target_district)
+	travel_waypoints = _build_turn_waypoints(player_pos, route_waypoints)
 	travel_target_pos = _next_travel_target()
 	if travel_target_pos.distance_to(travel_start_pos) > 1.0:
 		vehicle_target_angle = (travel_target_pos - travel_start_pos).angle()
@@ -909,19 +918,22 @@ func _travel_to_point(target_pos: Vector2, target_district := -1, destination_na
 	travel_cost = cost
 	travel_progress = 0.0
 	travel_duration = max(0.1, travel_start_pos.distance_to(travel_target_pos) / vehicle_speed)
-	is_traveling = true
+	is_traveling = not wait_for_play
+	combat_mode = wait_for_play
 	at_location = false
 	open_location_after_travel = enter_after_arrival
 	travel_suppress_arrival_event = suppress_arrival_event
 	selected_district = target_district if target_district != -1 else selected_district
 	modal_panel.visible = false
-	_log("Машина сменила курс: %s." % destination_name)
+	_log(("Маршрут выбран: %s. Нажмите PLAY для хода." if wait_for_play else "Машина сменила курс: %s.") % destination_name)
 	_refresh()
 
 func _reach_travel_point() -> void:
 	if travel_waypoints.size() > 0:
 		travel_target_pos = _next_travel_target()
 		travel_progress = _route_progress()
+		if advance_one_turn:
+			_pause_travel_turn(true)
 		return
 	travel_progress = 1.0
 	_finish_travel()
@@ -987,6 +999,41 @@ func _build_travel_waypoints(from_pos: Vector2, target_pos: Vector2, target_dist
 	points.append(target_pos)
 	return points
 
+func _build_turn_waypoints(from_pos: Vector2, route_points: Array[Vector2]) -> Array[Vector2]:
+	var points: Array[Vector2] = []
+	if route_points.is_empty():
+		return points
+	var polyline: Array[Vector2] = [from_pos]
+	for point in route_points:
+		polyline.append(point)
+	var total_length: float = _polyline_length(polyline)
+	var marker_distance: float = TURN_STEP_DISTANCE
+	while marker_distance < total_length - WAYPOINT_PASS_RADIUS:
+		points.append(_sample_polyline(polyline, marker_distance))
+		marker_distance += TURN_STEP_DISTANCE
+	points.append(route_points[route_points.size() - 1])
+	return points
+
+func _polyline_length(points: Array[Vector2]) -> float:
+	var total := 0.0
+	for i in range(points.size() - 1):
+		total += points[i].distance_to(points[i + 1])
+	return total
+
+func _sample_polyline(points: Array[Vector2], target_distance: float) -> Vector2:
+	var walked := 0.0
+	for i in range(points.size() - 1):
+		var a: Vector2 = points[i]
+		var b: Vector2 = points[i + 1]
+		var segment_len: float = a.distance_to(b)
+		if segment_len <= 0.01:
+			continue
+		if walked + segment_len >= target_distance:
+			var local_t: float = clamp((target_distance - walked) / segment_len, 0.0, 1.0)
+			return a.lerp(b, local_t)
+		walked += segment_len
+	return points[points.size() - 1]
+
 func _first_city_on_segment(from_pos: Vector2, target_pos: Vector2, target_district: int) -> int:
 	var best_index := -1
 	var best_along := 999999.0
@@ -1008,6 +1055,8 @@ func _first_city_on_segment(from_pos: Vector2, target_pos: Vector2, target_distr
 
 func _finish_travel() -> void:
 	is_traveling = false
+	combat_mode = false
+	advance_one_turn = false
 	water_tank = max(0, water_tank - travel_cost.get("water", 0))
 	battery = max(0, battery - travel_cost.get("power", 0))
 	if travel_target_district != -1:
@@ -1203,3 +1252,45 @@ func _map_point_clicked(world_pos: Vector2) -> void:
 	if player_pos.distance_to(world_pos) < MIN_FIELD_CLICK_DISTANCE:
 		return
 	_travel_to_point(world_pos, -1, "поле %.0f / %.0f" % [world_pos.x, world_pos.y], false)
+
+func _pause_travel_turn(enter_combat := false) -> void:
+	if not is_traveling:
+		if enter_combat:
+			combat_mode = true
+		return
+	var should_advance_cooldowns: bool = advance_one_turn and enter_combat
+	var remaining_target_pos: Vector2 = travel_final_pos
+	var remaining_target_district: int = travel_target_district
+	is_traveling = false
+	if enter_combat:
+		combat_mode = true
+	advance_one_turn = false
+	travel_start_pos = player_pos
+	travel_final_pos = remaining_target_pos
+	travel_target_district = remaining_target_district
+	var route_waypoints: Array[Vector2] = _build_travel_waypoints(player_pos, travel_final_pos, travel_target_district)
+	travel_waypoints = _build_turn_waypoints(player_pos, route_waypoints)
+	travel_target_pos = _next_travel_target()
+	travel_progress = _route_progress()
+	vehicle_velocity = Vector2.ZERO
+	vehicle_current_speed = 0.0
+	vehicle_previous_speed = 0.0
+	vehicle_is_braking = true
+	_log("Боевой режим: мир замер до следующего приказа." if combat_mode else "Караван остановился. Мир замер до следующего приказа.")
+	_refresh()
+	if map_panel != null:
+		if should_advance_cooldowns and map_panel.has_method("_advance_weapon_turn_cooldowns"):
+			map_panel.call("_advance_weapon_turn_cooldowns")
+		map_panel.queue_redraw()
+
+func _play_combat_turn() -> void:
+	if is_traveling or travel_destination_name == "" or not travel_target_pos.is_finite():
+		return
+	if map_panel != null and map_panel.has_method("_queue_player_turn_weapons"):
+		map_panel.call("_queue_player_turn_weapons")
+	is_traveling = true
+	combat_mode = false
+	advance_one_turn = true
+	at_location = false
+	_log("Ход: караван двигается к следующей точке маршрута.")
+	_refresh()

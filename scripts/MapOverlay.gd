@@ -28,6 +28,9 @@ func _draw() -> void:
 	_draw_destination_overlay()
 	_draw_weapon_range_overlay()
 	_draw_location_name_labels()
+	_draw_weapon_target_markers()
+	_draw_hovered_vehicle_target()
+	_draw_turns_to_cursor()
 	_draw_hover_card()
 	_draw_weapon_hud()
 	if not map.fullscreen_view:
@@ -85,6 +88,7 @@ func _draw_route_overlay() -> void:
 		right_track.append(map._to_screen(point - normal * track_half_width))
 	_draw_route_overlay_track(left_track)
 	_draw_route_overlay_track(right_track)
+	_draw_turn_markers_overlay()
 
 func _draw_route_overlay_track(points: Array[Vector2]) -> void:
 	var dash := 7.0
@@ -120,8 +124,37 @@ func _draw_route_overlay_track(points: Array[Vector2]) -> void:
 				remaining = dash if draw_dash else gap
 		traveled_len += segment_len
 
+func _draw_turn_markers_overlay() -> void:
+	var markers: Array[Vector2] = map._planned_turn_marker_points()
+	if markers.is_empty():
+		return
+	for world_pos in markers:
+		var screen_pos: Vector2 = map._to_screen(world_pos)
+		draw_circle(screen_pos, 9.5, Color("#ff7a1a", 0.14))
+		draw_circle(screen_pos, 4.2, Color("#ffb13d", 0.92))
+
+func _route_length(points: Array[Vector2]) -> float:
+	var total := 0.0
+	for i in range(points.size() - 1):
+		total += points[i].distance_to(points[i + 1])
+	return total
+
+func _sample_route_at_distance(points: Array[Vector2], target_distance: float) -> Vector2:
+	var walked := 0.0
+	for i in range(points.size() - 1):
+		var a: Vector2 = points[i]
+		var b: Vector2 = points[i + 1]
+		var segment_len := a.distance_to(b)
+		if segment_len <= 0.01:
+			continue
+		if walked + segment_len >= target_distance:
+			var local_t: float = clamp((target_distance - walked) / segment_len, 0.0, 1.0)
+			return a.lerp(b, local_t)
+		walked += segment_len
+	return points[points.size() - 1]
+
 func _draw_destination_overlay() -> void:
-	if not map.game.is_traveling:
+	if map.game.travel_destination_name == "" or not map.game.travel_final_pos.is_finite():
 		return
 	var screen_pos: Vector2 = map._to_screen(map.game.travel_final_pos)
 	if not Rect2(Vector2(-40.0, -40.0), size + Vector2(80.0, 80.0)).has_point(screen_pos):
@@ -235,6 +268,69 @@ func _draw_weapon_tooltip(slot_center: Vector2, text: String, color: Color) -> v
 	draw_rect(Rect2(tooltip_pos, tooltip_size), Color("#071013", 0.88), true)
 	draw_rect(Rect2(tooltip_pos, tooltip_size), Color(color.r, color.g, color.b, 0.42), false, 1.0)
 	draw_string(get_theme_default_font(), tooltip_pos + Vector2(10.0, 19.0), text, HORIZONTAL_ALIGNMENT_LEFT, 68.0, 12, Color("#eafff4", 0.94))
+
+func _draw_weapon_target_markers() -> void:
+	if map.game == null:
+		return
+	if map.pirate_active:
+		_draw_target_marker_at(map.pirate_pos, map.weapon_orders, "primary")
+	for enemy in map.debug_pirates:
+		_draw_targeted_by(enemy.get("pos", Vector2.ZERO), enemy.get("targeted_by", []))
+	for car in map.friendly_cars:
+		_draw_targeted_by(car.get("pos", Vector2.ZERO), car.get("targeted_by", []))
+
+func _draw_target_marker_at(world_pos: Vector2, orders: Dictionary, target_id: String) -> void:
+	var weapons := []
+	for weapon_index in orders.keys():
+		var order: Dictionary = orders[weapon_index]
+		if str(order.get("id", "")) == target_id:
+			weapons.append(int(weapon_index))
+	_draw_targeted_by(world_pos, weapons)
+
+func _draw_targeted_by(world_pos: Vector2, weapons: Array) -> void:
+	if weapons.is_empty():
+		return
+	var base: Vector2 = map._to_screen(world_pos) + Vector2(-float(weapons.size() - 1) * 11.0, -48.0)
+	for i in range(weapons.size()):
+		var weapon_index: int = int(weapons[i])
+		var color: Color = map._weapon_color(weapon_index)
+		var center: Vector2 = base + Vector2(float(i) * 22.0, 0.0)
+		draw_circle(center, 10.0, Color(color.r, color.g, color.b, 0.24))
+		draw_circle(center, 7.0, Color("#081014", 0.88))
+		draw_arc(center, 8.0, 0.0, TAU, 24, Color(color.r, color.g, color.b, 0.82), 1.2, true)
+		draw_string(get_theme_default_font(), center + Vector2(-4.0, 4.0), map._weapon_label(weapon_index), HORIZONTAL_ALIGNMENT_LEFT, 12.0, 10, Color("#f8ffff"))
+
+func _draw_hovered_vehicle_target() -> void:
+	if map.hovered_vehicle_target.is_empty():
+		return
+	var target: Dictionary = map.hovered_vehicle_target
+	var world_pos: Vector2 = target.get("pos", Vector2.ZERO)
+	var screen_pos: Vector2 = map._to_screen(world_pos)
+	if not Rect2(Vector2(-80.0, -80.0), size + Vector2(160.0, 160.0)).has_point(screen_pos):
+		return
+	var color := Color("#ff4b4b")
+	if target.get("type", "") == "friendly":
+		color = Color("#8fd7ff")
+	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.010)
+	var radius: float = lerp(31.0, 42.0, pulse)
+	draw_circle(screen_pos, radius + 14.0, Color(color.r, color.g, color.b, 0.055))
+	draw_circle(screen_pos, radius + 6.0, Color(color.r, color.g, color.b, 0.075))
+	draw_arc(screen_pos, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.78), 2.0, true)
+	draw_arc(screen_pos, radius + 7.0, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.32), 1.2, true)
+
+func _draw_turns_to_cursor() -> void:
+	if map.selected_weapon_index == -1 and not map.pirate_active and map.debug_pirates.is_empty():
+		return
+	var mouse_pos: Vector2 = get_local_mouse_position()
+	if not Rect2(Vector2.ZERO, size).has_point(mouse_pos):
+		return
+	var world_pos: Vector2 = map._to_world(mouse_pos)
+	var distance: float = map.game.player_pos.distance_to(world_pos)
+	var turns: int = max(1, int(ceil(distance / 180.0)))
+	var text := "%d ход." % turns
+	var pos := mouse_pos + Vector2(18.0, -18.0)
+	draw_rect(Rect2(pos + Vector2(-6.0, -17.0), Vector2(64.0, 24.0)), Color("#071013", 0.76), true)
+	draw_string(get_theme_default_font(), pos, text, HORIZONTAL_ALIGNMENT_LEFT, 58.0, 12, Color("#d8fff2", 0.94))
 
 func _draw_location_name_labels() -> void:
 	for i in range(map.game.districts.size()):
@@ -354,6 +450,7 @@ func _draw_minimap() -> void:
 	var pos := Vector2(size.x - map_size.x - 18, 18)
 	map.minimap_rect = Rect2(pos, map_size)
 	map.pirate_debug_button_rect = Rect2(pos + Vector2(0.0, map_size.y + 8.0), Vector2(38.0, 34.0))
+	map.play_turn_button_rect = Rect2(pos + Vector2(46.0, map_size.y + 8.0), Vector2(72.0, 34.0))
 	draw_rect(Rect2(pos, map_size), Color("#0d1215", 0.88), true)
 	draw_rect(Rect2(pos, map_size), Color("#e7ecef", 0.25), false, 1.0)
 	var scale = min(map_size.x / map.WORLD_SIZE.x, map_size.y / map.WORLD_SIZE.y)
@@ -368,16 +465,23 @@ func _draw_minimap() -> void:
 		var radius := 5.0 if map.game.at_location and i == map.game.current_district else 3.0
 		draw_circle(pos + pad + d.pos * scale, radius, map.game.FACTIONS[d.faction].color)
 	draw_circle(pos + pad + map.game.player_pos * scale, 4.5, Color("#e9c46a"))
+	for car in map.friendly_cars:
+		draw_circle(pos + pad + car.get("pos", Vector2.ZERO) * scale, 2.5, Color("#a8d8ff", 0.88))
 	if map.pirate_active:
 		var pirate_minimap_pos: Vector2 = pos + pad + map.pirate_pos * scale
 		draw_circle(pirate_minimap_pos, 5.0, Color("#ff3030", 0.30))
 		draw_circle(pirate_minimap_pos, 3.2, Color("#ff5b5b"))
 		draw_arc(pirate_minimap_pos, 6.2, 0.0, TAU, 20, Color("#ffb0b0", 0.85), 1.0)
+	for enemy in map.debug_pirates:
+		var enemy_minimap_pos: Vector2 = pos + pad + enemy.get("pos", Vector2.ZERO) * scale
+		draw_circle(enemy_minimap_pos, 4.2, Color("#ff3030", 0.22))
+		draw_circle(enemy_minimap_pos, 2.7, Color("#ff5b5b", 0.94))
 	var view_rect := Rect2(pos + pad + map.camera_offset * scale, size * scale)
 	draw_rect(view_rect, Color("#f4f1de", 0.08), true)
 	draw_rect(view_rect, Color("#f4f1de", 0.80), false, 1.0)
 	draw_string(get_theme_default_font(), pos + Vector2(10, map_size.y - 10), "Перейти к точке", HORIZONTAL_ALIGNMENT_LEFT, 180, 11, Color("#cfd8dc"))
 	_draw_pirate_debug_button(map.pirate_debug_button_rect)
+	_draw_play_turn_button(map.play_turn_button_rect)
 
 func _draw_pirate_debug_button(button_rect: Rect2) -> void:
 	var hovered: bool = button_rect.has_point(get_local_mouse_position())
@@ -396,3 +500,20 @@ func _draw_pirate_debug_button(button_rect: Rect2) -> void:
 		draw_rect(Rect2(tooltip_pos, tooltip_size), Color("#071013", 0.88), true)
 		draw_rect(Rect2(tooltip_pos, tooltip_size), Color(accent.r, accent.g, accent.b, 0.42), false, 1.0)
 		draw_string(get_theme_default_font(), tooltip_pos + Vector2(9.0, 18.0), "Добавить пирата", HORIZONTAL_ALIGNMENT_LEFT, 96.0, 11, Color("#ffe8e5"))
+
+func _draw_play_turn_button(button_rect: Rect2) -> void:
+	var hovered: bool = button_rect.has_point(get_local_mouse_position())
+	var accent := Color("#45ff87")
+	var enabled: bool = map.game.travel_destination_name != "" and not map.game.is_traveling
+	var alpha: float = 0.92 if hovered and enabled else (0.72 if enabled else 0.34)
+	draw_rect(button_rect.grow(6.0), Color(accent.r, accent.g, accent.b, 0.16 if hovered and enabled else 0.06), true)
+	draw_rect(button_rect, Color("#0d1215", alpha), true)
+	draw_rect(button_rect, Color(accent.r, accent.g, accent.b, 0.58 if enabled else 0.22), false, 1.2)
+	var text_color := Color("#d7ffe4", 0.96 if enabled else 0.44)
+	draw_string(get_theme_default_font(), button_rect.position + Vector2(15.0, 22.0), "PLAY", HORIZONTAL_ALIGNMENT_LEFT, 54.0, 12, text_color)
+	if hovered:
+		var tooltip_pos := button_rect.position + Vector2(82.0, 4.0)
+		var tooltip_size := Vector2(104.0, 26.0)
+		draw_rect(Rect2(tooltip_pos, tooltip_size), Color("#071013", 0.88), true)
+		draw_rect(Rect2(tooltip_pos, tooltip_size), Color(accent.r, accent.g, accent.b, 0.36), false, 1.0)
+		draw_string(get_theme_default_font(), tooltip_pos + Vector2(9.0, 18.0), "Следующий ход", HORIZONTAL_ALIGNMENT_LEFT, 90.0, 11, Color("#eafff4", 0.92))
