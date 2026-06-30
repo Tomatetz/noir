@@ -893,6 +893,8 @@ func _travel(target: int, enter_after_arrival := false) -> void:
 func _travel_to_point(target_pos: Vector2, target_district := -1, destination_name := "точка маршрута", enter_after_arrival := false, suppress_arrival_event := false) -> void:
 	if not target_pos.is_finite():
 		return
+	if is_traveling and advance_one_turn:
+		return
 	var wait_for_play: bool = combat_mode
 	var cost = _movement_cost(player_pos, target_pos)
 	if suppress_arrival_event:
@@ -934,6 +936,10 @@ func _reach_travel_point() -> void:
 		travel_progress = _route_progress()
 		if advance_one_turn:
 			_pause_travel_turn(true)
+		return
+	if advance_one_turn:
+		travel_progress = 1.0
+		_finish_travel()
 		return
 	travel_progress = 1.0
 	_finish_travel()
@@ -1054,6 +1060,7 @@ func _first_city_on_segment(from_pos: Vector2, target_pos: Vector2, target_distr
 	return best_index
 
 func _finish_travel() -> void:
+	var finished_combat_turn := advance_one_turn
 	is_traveling = false
 	combat_mode = false
 	advance_one_turn = false
@@ -1087,6 +1094,13 @@ func _finish_travel() -> void:
 	vehicle_previous_speed = 0.0
 	vehicle_is_braking = false
 	vehicle_steer = 0.0
+	if finished_combat_turn and map_panel != null:
+		if map_panel.has_method("_complete_combat_turn"):
+			map_panel.call("_complete_combat_turn")
+		if not at_location and map_panel.has_method("_has_active_combat_targets"):
+			combat_mode = bool(map_panel.call("_has_active_combat_targets"))
+			if combat_mode:
+				_log("Боевой режим: маршрут завершён, мир замер до следующего приказа.")
 	_refresh()
 	if open_location_after_travel:
 		open_location_after_travel = false
@@ -1235,6 +1249,8 @@ func _log(text: String) -> void:
 	event_log.text = "[color=#9ad1d4]День %d[/color] %s\n%s" % [day, text, event_log.text]
 
 func _map_location_clicked(index: int) -> void:
+	if is_traveling and advance_one_turn:
+		return
 	selected_district = index
 	if not is_traveling and at_location and index == current_district:
 		_enter_location(index)
@@ -1249,9 +1265,21 @@ func _enter_location(index: int) -> void:
 	_refresh()
 
 func _map_point_clicked(world_pos: Vector2) -> void:
+	if is_traveling and advance_one_turn:
+		return
 	if player_pos.distance_to(world_pos) < MIN_FIELD_CLICK_DISTANCE:
 		return
 	_travel_to_point(world_pos, -1, "поле %.0f / %.0f" % [world_pos.x, world_pos.y], false)
+
+func _queue_combat_pause_at_next_waypoint() -> void:
+	if not is_traveling:
+		_pause_travel_turn(true)
+		return
+	if advance_one_turn:
+		return
+	advance_one_turn = true
+	_log("Попадание: караван дотянет до ближайшей точки и остановится.")
+	_refresh()
 
 func _pause_travel_turn(enter_combat := false) -> void:
 	if not is_traveling:
@@ -1288,6 +1316,8 @@ func _play_combat_turn() -> void:
 		return
 	if map_panel != null and map_panel.has_method("_queue_player_turn_weapons"):
 		map_panel.call("_queue_player_turn_weapons")
+	if map_panel != null and map_panel.has_method("_queue_enemy_turn_weapons"):
+		map_panel.call("_queue_enemy_turn_weapons")
 	is_traveling = true
 	combat_mode = false
 	advance_one_turn = true

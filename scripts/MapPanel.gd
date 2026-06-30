@@ -99,6 +99,8 @@ var route_lines := {}
 var heat_nodes := []
 var district_nodes := []
 var current_route_points: Array[Vector2] = []
+var travel_route_signature := ""
+var travel_route_refresh_timer := 0.0
 var cloud_textures := []
 var cloud_props := []
 var cloud_rng := RandomNumberGenerator.new()
@@ -127,6 +129,7 @@ var friendly_cars: Array[Dictionary] = []
 var debug_pirates: Array[Dictionary] = []
 var selected_weapon_index := -1
 var hovered_vehicle_target := {}
+var primary_pirate_targeted_by: Array = []
 var weapon_orders := {}
 var road_bump_rng := RandomNumberGenerator.new()
 var bump_timer := 0.0
@@ -151,7 +154,12 @@ var pirate_spawn_timer := 10.0
 var pirate_pos := Vector2.ZERO
 var pirate_angle := 0.0
 var pirate_speed := 155.0
-var pirate_fire_timer := 2.6
+var pirate_weapon_cooldown := 0.0
+var pirate_weapon_rate := 2.0
+var pirate_weapon_range := 720.0
+var pirate_weapons: Array[Dictionary] = []
+var pirate_turn_weapon_queued := false
+var pirate_turn_weapon_delay := 0.0
 var pirate_fire_phase := 0.0
 var pirate_fire_duration := 0.0
 var pirate_laser_start := Vector2.ZERO
@@ -417,7 +425,7 @@ func _setup_debug_traffic() -> void:
 	for i in range(3):
 		_spawn_friendly_car(i)
 
-func _make_simple_vehicle(texture: Texture2D, tint: Color, scale_mul := 0.92) -> Node2D:
+func _make_simple_vehicle(texture: Texture2D, tint: Color, scale_mul := 0.92, front_texture: Texture2D = null, back_texture: Texture2D = null) -> Node2D:
 	var root := Node2D.new()
 	root.z_as_relative = false
 	root.z_index = 10
@@ -433,6 +441,36 @@ func _make_simple_vehicle(texture: Texture2D, tint: Color, scale_mul := 0.92) ->
 	glow.energy = 0.22
 	glow.texture_scale = 0.85
 	root.add_child(glow)
+	if front_texture != null:
+		var front_overlay := Sprite2D.new()
+		front_overlay.texture = front_texture
+		front_overlay.scale = Vector2.ONE * VEHICLE_TEXTURE_SCALE * scale_mul
+		front_overlay.z_index = 3
+		front_overlay.light_mask = 1
+		front_overlay.modulate = Color(1.0, 1.0, 1.0, 0.94)
+		root.add_child(front_overlay)
+		var front_left := _make_front_light()
+		var front_right := _make_front_light()
+		front_left.position = Vector2(-7.0, -31.0) * scale_mul
+		front_right.position = Vector2(7.0, -31.0) * scale_mul
+		front_left.rotation = -PI * 0.5
+		front_right.rotation = -PI * 0.5
+		front_left.energy = 1.10
+		front_right.energy = 1.10
+		front_left.texture_scale = 1.02
+		front_right.texture_scale = 1.02
+		front_left.enabled = true
+		front_right.enabled = true
+		root.add_child(front_left)
+		root.add_child(front_right)
+	if back_texture != null:
+		var back_overlay := Sprite2D.new()
+		back_overlay.texture = back_texture
+		back_overlay.scale = Vector2.ONE * VEHICLE_TEXTURE_SCALE * scale_mul
+		back_overlay.z_index = 3
+		back_overlay.light_mask = 1
+		back_overlay.modulate = Color(1.0, 1.0, 1.0, 0.46)
+		root.add_child(back_overlay)
 	npc_root.add_child(root)
 	return root
 
@@ -1160,6 +1198,7 @@ func _process(delta: float) -> void:
 		return
 	_update_pirate(delta)
 	_update_debug_pirates(delta)
+	_update_auto_combat_trigger()
 	_update_damage_popups(delta)
 	_update_impact_sparks(delta)
 	_update_player_weapon(delta)
@@ -1302,7 +1341,7 @@ func _assign_weapon_target(local_pos: Vector2) -> void:
 	queue_redraw()
 
 func _target_at_screen(local_pos: Vector2) -> Dictionary:
-	if pirate_active and local_pos.distance_to(_to_screen(pirate_pos)) <= 42.0:
+	if pirate_active and pirate_root != null and pirate_root.visible and local_pos.distance_to(_to_screen(pirate_pos)) <= 42.0:
 		return {"type": "primary_pirate", "id": "primary", "pos": pirate_pos}
 	for i in range(debug_pirates.size()):
 		var enemy: Dictionary = debug_pirates[i]
@@ -1315,7 +1354,10 @@ func _target_at_screen(local_pos: Vector2) -> Dictionary:
 	return {}
 
 func _mark_targeted_vehicle(target: Dictionary, weapon_index: int) -> void:
-	if target.get("type", "") == "pirate" and int(target.get("index", -1)) >= 0:
+	if target.get("type", "") == "primary_pirate":
+		if not primary_pirate_targeted_by.has(weapon_index):
+			primary_pirate_targeted_by.append(weapon_index)
+	elif target.get("type", "") == "pirate" and int(target.get("index", -1)) >= 0:
 		var index: int = int(target["index"])
 		var enemy: Dictionary = debug_pirates[index]
 		var targeted_by: Array = enemy.get("targeted_by", [])
@@ -1398,6 +1440,7 @@ func _apply_damage_to_target(target: Dictionary, amount: int, color: Color) -> v
 			var root: Node2D = enemy["root"] as Node2D
 			if is_instance_valid(root):
 				root.queue_free()
+			_clear_removed_target("pirate", str(enemy.get("id", "")))
 			debug_pirates.remove_at(index)
 	elif target_type == "friendly":
 		var index: int = int(target.get("index", -1))
@@ -1853,7 +1896,10 @@ func _spawn_pirate() -> void:
 	pirate_speed = road_bump_rng.randf_range(145.0, 190.0)
 	pirate_hull = 100
 	pirate_laser_color = _random_laser_color()
-	pirate_fire_timer = road_bump_rng.randf_range(1.2, 3.0)
+	pirate_weapons = _make_enemy_weapons(road_bump_rng.randi_range(2, 3), pirate_laser_color)
+	_sync_primary_pirate_weapon_fields()
+	pirate_turn_weapon_queued = false
+	pirate_turn_weapon_delay = 0.0
 	pirate_fire_phase = 0.0
 	player_weapon_cooldown = 0.0
 	player_missile_cooldown = 0.0
@@ -1864,9 +1910,10 @@ func _spawn_pirate() -> void:
 func _spawn_debug_pirate() -> void:
 	if game == null or pirate_root == null or game.at_location:
 		return
-	_spawn_extra_pirate()
 	if not pirate_active:
 		_spawn_pirate()
+	else:
+		_spawn_extra_pirate()
 
 func _spawn_extra_pirate() -> void:
 	var player_forward: Vector2 = Vector2.RIGHT.rotated(game.vehicle_angle)
@@ -1876,7 +1923,7 @@ func _spawn_extra_pirate() -> void:
 	var pos: Vector2 = game.player_pos - player_forward * road_bump_rng.randf_range(360.0, 620.0) + side * road_bump_rng.randf_range(-230.0, 230.0)
 	pos.x = clamp(pos.x, 0.0, WORLD_SIZE.x)
 	pos.y = clamp(pos.y, 0.0, WORLD_SIZE.y)
-	var root := _make_simple_vehicle(pirate_car_texture, Color("#ff7f73"), 0.94)
+	var root := _make_simple_vehicle(pirate_car_texture, Color("#ff7f73"), 0.94, pirate_light_front_texture, pirate_light_back_texture)
 	debug_pirates.append({
 		"id": "pirate_%d" % debug_pirates.size(),
 		"root": root,
@@ -1884,8 +1931,33 @@ func _spawn_extra_pirate() -> void:
 		"angle": player_forward.angle(),
 		"speed": road_bump_rng.randf_range(118.0, 168.0),
 		"hull": 100,
+		"weapons": _make_enemy_weapons(road_bump_rng.randi_range(1, 3), _random_laser_color()),
 		"targeted_by": []
 	})
+
+func _make_enemy_weapons(count: int, base_color: Color) -> Array[Dictionary]:
+	var weapons: Array[Dictionary] = []
+	for i in range(count):
+		var weapon_color: Color = base_color if i == 0 else _random_laser_color()
+		weapons.append({
+			"name": "Лазер",
+			"rate": float(road_bump_rng.randi_range(1, 3)),
+			"cooldown": 0.0,
+			"range": road_bump_rng.randf_range(520.0 + float(i) * 55.0, 820.0 + float(i) * 65.0),
+			"color": weapon_color
+		})
+	return weapons
+
+func _sync_primary_pirate_weapon_fields() -> void:
+	if pirate_weapons.is_empty():
+		pirate_weapon_rate = 2.0
+		pirate_weapon_range = 720.0
+		pirate_weapon_cooldown = 0.0
+		return
+	var weapon: Dictionary = pirate_weapons[0]
+	pirate_weapon_rate = float(weapon.get("rate", 2.0))
+	pirate_weapon_range = float(weapon.get("range", 720.0))
+	pirate_weapon_cooldown = float(weapon.get("cooldown", 0.0))
 
 func _update_debug_pirates(delta: float) -> void:
 	for i in range(debug_pirates.size()):
@@ -1951,16 +2023,11 @@ func _update_pirate_laser(delta: float) -> void:
 		return
 	if pirate_fire_phase > 0.0:
 		pirate_fire_phase = max(0.0, pirate_fire_phase - delta)
-	else:
-		pirate_fire_timer -= delta
-		if pirate_fire_timer <= 0.0:
-			pirate_fire_duration = road_bump_rng.randf_range(0.14, 0.28)
-			pirate_fire_phase = pirate_fire_duration
-			pirate_laser_blur = road_bump_rng.randf_range(0.72, 1.45)
-			pirate_laser_curve_seed = road_bump_rng.randf_range(0.0, TAU)
-			pirate_laser_curve_strength = road_bump_rng.randf_range(12.0, 38.0)
-			pirate_laser_damage_applied = false
-			pirate_fire_timer = road_bump_rng.randf_range(2.3, 5.2)
+	elif game.is_traveling and pirate_turn_weapon_queued:
+		pirate_turn_weapon_delay = max(0.0, pirate_turn_weapon_delay - delta)
+		if pirate_turn_weapon_delay <= 0.0:
+			pirate_turn_weapon_queued = false
+			_start_pirate_turn_laser()
 	var firing: bool = pirate_fire_phase > 0.0
 	pirate_laser_root.visible = firing
 	if not firing:
@@ -1980,8 +2047,8 @@ func _update_pirate_laser(delta: float) -> void:
 		_update_health_bar_node(_to_screen(game.player_pos))
 		_spawn_damage_popup(damage_amount, damage_pos, clamp(float(game.hull) / 100.0, 0.0, 1.0))
 		_spawn_impact_sparks(damage_pos, pirate_laser_color, 28)
-		if game.has_method("_pause_travel_turn") and not bool(game.get("combat_mode")) and not bool(game.get("advance_one_turn")):
-			game.call("_pause_travel_turn", true)
+		if game.has_method("_queue_combat_pause_at_next_waypoint"):
+			game.call("_queue_combat_pause_at_next_waypoint")
 	var to_player: Vector2 = game.player_pos - pirate_pos
 	var cannon_forward: Vector2 = to_player.normalized() if to_player.length() > 0.01 else Vector2.RIGHT.rotated(pirate_angle)
 	pirate_laser_start = pirate_pos + cannon_forward * 28.0
@@ -2024,6 +2091,36 @@ func _update_pirate_laser(delta: float) -> void:
 		laser_light.energy = 1.0 + curve_alpha * 2.2
 		laser_light.texture_scale = 1.55 + curve_alpha * 0.85
 
+func _start_pirate_turn_laser() -> void:
+	if not pirate_active or pirate_fire_phase > 0.0 or game == null:
+		return
+	var weapon_index: int = _ready_enemy_weapon_index(pirate_weapons, pirate_pos)
+	if weapon_index == -1:
+		return
+	var weapon: Dictionary = pirate_weapons[weapon_index]
+	pirate_laser_color = weapon.get("color", pirate_laser_color)
+	pirate_fire_duration = road_bump_rng.randf_range(0.14, 0.28)
+	pirate_fire_phase = pirate_fire_duration
+	pirate_laser_blur = road_bump_rng.randf_range(0.72, 1.45)
+	pirate_laser_curve_seed = road_bump_rng.randf_range(0.0, TAU)
+	pirate_laser_curve_strength = road_bump_rng.randf_range(12.0, 38.0)
+	pirate_laser_damage_applied = false
+	weapon["cooldown"] = float(weapon.get("rate", 2.0))
+	pirate_weapons[weapon_index] = weapon
+	_sync_primary_pirate_weapon_fields()
+
+func _ready_enemy_weapon_index(weapons: Array, origin: Vector2) -> int:
+	if game == null:
+		return -1
+	for i in range(weapons.size()):
+		var weapon: Dictionary = weapons[i]
+		if float(weapon.get("cooldown", 0.0)) > 0.0:
+			continue
+		if origin.distance_to(game.player_pos) > float(weapon.get("range", 0.0)):
+			continue
+		return i
+	return -1
+
 func _update_player_weapon(delta: float) -> void:
 	if game == null or not game.is_traveling or not player_turn_weapon_queued:
 		return
@@ -2035,7 +2132,75 @@ func _update_player_weapon(delta: float) -> void:
 
 func _queue_player_turn_weapons() -> void:
 	player_turn_weapon_queued = true
-	player_turn_weapon_delay = 0.32
+	player_turn_weapon_delay = 0.16
+
+func _queue_enemy_turn_weapons() -> void:
+	if _primary_pirate_can_fire():
+		pirate_turn_weapon_queued = true
+		pirate_turn_weapon_delay = road_bump_rng.randf_range(0.16, 0.34)
+
+func _update_auto_combat_trigger() -> void:
+	if game == null or not game.is_traveling or bool(game.get("combat_mode")) or bool(game.get("advance_one_turn")):
+		return
+	var player_can_fire := _has_ordered_ready_weapon_in_range()
+	var enemy_can_fire := _primary_pirate_can_fire()
+	if not player_can_fire and not enemy_can_fire:
+		return
+	if player_can_fire:
+		_queue_player_turn_weapons()
+	if enemy_can_fire:
+		_assign_auto_response_targets()
+		_queue_enemy_turn_weapons()
+	if game.has_method("_queue_combat_pause_at_next_waypoint"):
+		game.call("_queue_combat_pause_at_next_waypoint")
+
+func _assign_auto_response_targets() -> void:
+	var target := _auto_response_target()
+	if target.is_empty():
+		return
+	if not weapon_orders.has(0) and player_weapon_cooldown <= 0.0:
+		weapon_orders[0] = target
+		_mark_targeted_vehicle(target, 0)
+	if not weapon_orders.has(1) and player_missile_cooldown <= 0.0:
+		weapon_orders[1] = target
+		_mark_targeted_vehicle(target, 1)
+	queue_redraw()
+
+func _auto_response_target() -> Dictionary:
+	var best := {}
+	var best_distance := INF
+	if _primary_pirate_can_fire():
+		best = {"type": "primary_pirate", "id": "primary", "pos": pirate_pos}
+		best_distance = game.player_pos.distance_to(pirate_pos)
+	for i in range(debug_pirates.size()):
+		var enemy: Dictionary = debug_pirates[i]
+		if _ready_enemy_weapon_index(enemy.get("weapons", []), enemy.get("pos", Vector2.ZERO)) == -1:
+			continue
+		var distance: float = game.player_pos.distance_to(enemy.get("pos", Vector2.ZERO))
+		if distance < best_distance:
+			best_distance = distance
+			best = {"type": "pirate", "id": enemy.get("id", ""), "index": i, "pos": enemy.get("pos", Vector2.ZERO)}
+	if best.is_empty() and pirate_active and pirate_root != null and pirate_root.visible:
+		best = {"type": "primary_pirate", "id": "primary", "pos": pirate_pos}
+	return best
+
+func _has_ordered_ready_weapon_in_range() -> bool:
+	if game == null or weapon_orders.is_empty():
+		return false
+	for weapon_index in weapon_orders.keys():
+		var index: int = int(weapon_index)
+		var target := _resolve_target_ref(weapon_orders[weapon_index])
+		if target.is_empty():
+			continue
+		var distance: float = game.player_pos.distance_to(target["pos"])
+		if index == 0 and player_weapon_cooldown <= 0.0 and player_fire_phase <= 0.0 and distance <= player_weapon_range:
+			return true
+		if index == 1 and player_missile_cooldown <= 0.0 and distance <= player_missile_range:
+			return true
+	return false
+
+func _primary_pirate_can_fire() -> bool:
+	return pirate_active and game != null and pirate_fire_phase <= 0.0 and _ready_enemy_weapon_index(pirate_weapons, pirate_pos) != -1
 
 func _execute_player_turn_weapons() -> void:
 	if game == null:
@@ -2043,19 +2208,63 @@ func _execute_player_turn_weapons() -> void:
 	var laser_target: Dictionary = _resolve_weapon_target(0)
 	if player_weapon_cooldown <= 0.0 and player_fire_phase <= 0.0 and not laser_target.is_empty():
 		if game.player_pos.distance_to(laser_target["pos"]) <= player_weapon_range:
+			_mark_targeted_vehicle(laser_target, 0)
 			_start_player_weapon_fire(laser_target)
 			player_weapon_cooldown = player_weapon_rate
 	var missile_target: Dictionary = _resolve_weapon_target(1)
 	if player_missile_cooldown <= 0.0 and not missile_target.is_empty():
 		if game.player_pos.distance_to(missile_target["pos"]) <= player_missile_range:
+			_mark_targeted_vehicle(missile_target, 1)
 			_fire_player_missile_salvo(missile_target)
 			player_missile_cooldown = player_missile_rate
 
 func _advance_weapon_turn_cooldowns() -> void:
 	player_turn_weapon_queued = false
 	player_turn_weapon_delay = 0.0
+	pirate_turn_weapon_queued = false
+	pirate_turn_weapon_delay = 0.0
 	player_weapon_cooldown = max(0.0, player_weapon_cooldown - 1.0)
 	player_missile_cooldown = max(0.0, player_missile_cooldown - 1.0)
+	for i in range(pirate_weapons.size()):
+		var weapon: Dictionary = pirate_weapons[i]
+		weapon["cooldown"] = max(0.0, float(weapon.get("cooldown", 0.0)) - 1.0)
+		pirate_weapons[i] = weapon
+	_sync_primary_pirate_weapon_fields()
+	for i in range(debug_pirates.size()):
+		var enemy: Dictionary = debug_pirates[i]
+		var weapons: Array = enemy.get("weapons", [])
+		for weapon_index in range(weapons.size()):
+			var weapon: Dictionary = weapons[weapon_index]
+			weapon["cooldown"] = max(0.0, float(weapon.get("cooldown", 0.0)) - 1.0)
+			weapons[weapon_index] = weapon
+		enemy["weapons"] = weapons
+		debug_pirates[i] = enemy
+
+func _complete_combat_turn() -> void:
+	if player_turn_weapon_queued:
+		player_turn_weapon_queued = false
+		player_turn_weapon_delay = 0.0
+		_execute_player_turn_weapons()
+	if pirate_turn_weapon_queued:
+		pirate_turn_weapon_queued = false
+		pirate_turn_weapon_delay = 0.0
+		_start_pirate_turn_laser()
+	_advance_weapon_turn_cooldowns()
+
+func _enemy_weapons_for_target(target: Dictionary) -> Array:
+	var target_type: String = target.get("type", "")
+	if target_type == "primary_pirate":
+		return pirate_weapons
+	if target_type == "pirate":
+		var index: int = int(target.get("index", -1))
+		if index >= 0 and index < debug_pirates.size():
+			return debug_pirates[index].get("weapons", [])
+	return []
+
+func _has_active_combat_targets() -> bool:
+	if pirate_active and pirate_root != null and pirate_root.visible:
+		return true
+	return not debug_pirates.is_empty()
 
 func _start_player_weapon_fire(target: Dictionary) -> void:
 	if player_laser_root == null or target.is_empty():
@@ -2302,8 +2511,11 @@ func _update_player_missiles(delta: float) -> void:
 		if hit:
 			var damage_amount: int = int(missile["damage"])
 			_apply_damage_to_target(resolved_target, damage_amount, color)
-			_free_player_missile(missile)
-			player_missiles.remove_at(i)
+			if i < player_missiles.size():
+				var current_missile: Dictionary = player_missiles[i]
+				if current_missile.get("node", null) == missile.get("node", null):
+					_free_player_missile(missile)
+					player_missiles.remove_at(i)
 			if resolved_target.get("type", "") == "primary_pirate" and not pirate_active:
 				return
 		else:
@@ -2516,10 +2728,12 @@ func _sample_points_curve(points: Array[Vector2], start: Vector2, end: Vector2, 
 	return points[index].lerp(points[next_index], local_t)
 
 func _despawn_pirate() -> void:
+	_clear_removed_target("primary_pirate", "primary")
 	pirate_active = false
 	pirate_fire_phase = 0.0
 	pirate_laser_damage_applied = false
 	pirate_laser_points.clear()
+	primary_pirate_targeted_by.clear()
 	player_fire_phase = 0.0
 	player_weapon_cooldown = 0.0
 	player_missile_cooldown = 0.0
@@ -2531,6 +2745,37 @@ func _despawn_pirate() -> void:
 		pirate_root.position = pirate_pos
 	if pirate_laser_root != null:
 		pirate_laser_root.visible = false
+
+func _clear_removed_target(target_type: String, target_id: String) -> void:
+	var keys_to_remove := []
+	for weapon_index in weapon_orders.keys():
+		var order: Dictionary = weapon_orders[weapon_index]
+		if str(order.get("type", "")) == target_type and str(order.get("id", "")) == target_id:
+			keys_to_remove.append(weapon_index)
+	for weapon_index in keys_to_remove:
+		weapon_orders.erase(weapon_index)
+	if str(hovered_vehicle_target.get("type", "")) == target_type and str(hovered_vehicle_target.get("id", "")) == target_id:
+		hovered_vehicle_target = {}
+	if target_type == "primary_pirate":
+		primary_pirate_targeted_by.clear()
+	if str(player_laser_target.get("type", "")) == target_type and str(player_laser_target.get("id", "")) == target_id:
+		player_laser_target = {}
+		player_fire_phase = 0.0
+		player_laser_points.clear()
+	for i in range(player_missiles.size() - 1, -1, -1):
+		var missile: Dictionary = player_missiles[i]
+		var target_ref: Dictionary = missile.get("target_ref", {})
+		if str(target_ref.get("type", "")) == target_type and str(target_ref.get("id", "")) == target_id:
+			_free_player_missile(missile)
+			player_missiles.remove_at(i)
+	for i in range(debug_pirates.size()):
+		var enemy: Dictionary = debug_pirates[i]
+		var targeted_by: Array = enemy.get("targeted_by", [])
+		if str(enemy.get("id", "")) == target_id and target_type == "pirate":
+			targeted_by.clear()
+		enemy["targeted_by"] = targeted_by
+		debug_pirates[i] = enemy
+	queue_redraw()
 	if pirate_laser_light != null:
 		pirate_laser_light.energy = 0.0
 	for laser_light in pirate_laser_lights:
@@ -2559,16 +2804,21 @@ func _update_pirate_node() -> void:
 	pirate_front_right_light.position = Vector2(7, -31)
 	pirate_front_left_light.rotation = -PI * 0.5
 	pirate_front_right_light.rotation = -PI * 0.5
-	pirate_front_left_light.energy = 0.82
-	pirate_front_right_light.energy = 0.82
-	pirate_front_left_light.texture_scale = 0.94
-	pirate_front_right_light.texture_scale = 0.94
-	pirate_front_overlay_sprite.modulate = Color(1.0, 1.0, 1.0, 0.92)
+	pirate_front_left_light.energy = 1.28
+	pirate_front_right_light.energy = 1.28
+	pirate_front_left_light.texture_scale = 1.08
+	pirate_front_right_light.texture_scale = 1.08
+	pirate_front_left_light.enabled = true
+	pirate_front_right_light.enabled = true
+	pirate_front_overlay_sprite.visible = true
+	pirate_front_overlay_sprite.modulate = Color(1.0, 1.0, 1.0, 1.0)
 	pirate_back_overlay_sprite.modulate = Color(1.0, 1.0, 1.0, 0.45)
 	pirate_rear_left_light.position = Vector2(-8, 30)
 	pirate_rear_right_light.position = Vector2(8, 30)
 	pirate_rear_left_light.energy = 0.34
 	pirate_rear_right_light.energy = 0.34
+	pirate_rear_left_light.enabled = true
+	pirate_rear_right_light.enabled = true
 	pirate_cannon_sprite.rotation = cannon_angle - pirate_angle
 	_update_pirate_health_bar_node(screen_pos)
 
@@ -2658,6 +2908,13 @@ func _update_vehicle_node(screen_pos = null, angle = null) -> void:
 	rear_left_light.enabled = rear_energy > 0.0
 	rear_right_light.enabled = rear_energy > 0.0
 	back_overlay_sprite.visible = not game.is_traveling or game.vehicle_is_braking
+	var pirate_light_on_player: float = _pirate_headlight_factor(game.player_pos)
+	var lit_tint := Color(1.0, 0.94, 0.78, 1.0)
+	var base_tint := Color.WHITE
+	var vehicle_tint: Color = base_tint.lerp(lit_tint, pirate_light_on_player * 0.36)
+	car_sprite.modulate = vehicle_tint
+	wheel_left_sprite.modulate = vehicle_tint
+	wheel_right_sprite.modulate = vehicle_tint
 	_update_health_bar_node(pos)
 
 func _update_health_bar_node(screen_pos: Vector2) -> void:
@@ -2899,6 +3156,7 @@ func _update_cloud_visibility(delta: float) -> void:
 		var laser_light_factor: float = _laser_cloud_light_factor(sprite.position)
 		var missile_light_factor: float = _missile_cloud_light_factor(sprite.position)
 		var destination_light_factor: float = _destination_cloud_light_factor(sprite.position)
+		var pirate_headlight_factor: float = _pirate_headlight_factor(sprite.position)
 		var target_alpha: float = max_alpha * fade_in * lerp(1.0, 1.34, light_factor)
 		target_alpha *= lerp(1.0, 1.04, route_light_factor)
 		target_alpha *= lerp(1.0, 1.65, health_light_factor)
@@ -2906,6 +3164,7 @@ func _update_cloud_visibility(delta: float) -> void:
 		target_alpha *= lerp(1.0, 1.85, laser_light_factor)
 		target_alpha *= lerp(1.0, 1.45, missile_light_factor)
 		target_alpha *= lerp(1.0, 1.50, destination_light_factor)
+		target_alpha *= lerp(1.0, 1.62, pirate_headlight_factor)
 		target_alpha = min(target_alpha, 0.95)
 		var target_tint: Color = Color(0.88, 0.96, 0.98, 1.0).lerp(Color(1.0, 0.72, 0.36, 1.0), light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.44, 1.0, 0.66, 1.0), route_light_factor * 0.12)
@@ -2914,6 +3173,7 @@ func _update_cloud_visibility(delta: float) -> void:
 		target_tint = target_tint.lerp(_color_with_alpha(_laser_cloud_color(sprite.position).lightened(0.25), 1.0), laser_light_factor)
 		target_tint = target_tint.lerp(_missile_cloud_color(sprite.position).lightened(0.22), missile_light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.92, 1.0, 0.86, 1.0), destination_light_factor)
+		target_tint = target_tint.lerp(Color(1.0, 0.84, 0.48, 1.0), pirate_headlight_factor * 0.92)
 		var color: Color = sprite.modulate
 		var tint_lerp: float = clamp(delta * 2.4, 0.0, 1.0)
 		color.r = lerp(color.r, target_tint.r, tint_lerp)
@@ -3039,6 +3299,29 @@ func _destination_cloud_light_factor(world_pos: Vector2) -> float:
 	var raw_light: float = clamp(1.0 - distance / 300.0, 0.0, 1.0)
 	return pow(raw_light, 1.2)
 
+func _pirate_headlight_factor(world_pos: Vector2) -> float:
+	var best: float = 0.0
+	if not pirate_active or pirate_root == null or not pirate_root.visible:
+		pass
+	else:
+		best = max(best, _vehicle_headlight_factor(pirate_pos, pirate_angle, world_pos))
+	for enemy in debug_pirates:
+		best = max(best, _vehicle_headlight_factor(enemy.get("pos", Vector2.ZERO), float(enemy.get("angle", 0.0)), world_pos) * 0.88)
+	return best
+
+func _vehicle_headlight_factor(origin: Vector2, angle: float, world_pos: Vector2) -> float:
+	var forward := Vector2.RIGHT.rotated(angle)
+	var side := forward.orthogonal()
+	var relative: Vector2 = world_pos - origin
+	var along: float = relative.dot(forward)
+	if along <= 0.0 or along > 700.0:
+		return 0.0
+	var lateral: float = abs(relative.dot(side))
+	var spread: float = along * 0.50 + 34.0
+	var cone: float = clamp(1.0 - lateral / spread, 0.0, 1.0)
+	var distance_fade: float = clamp(1.0 - along / 700.0, 0.0, 1.0)
+	return pow(cone, 1.18) * pow(distance_fade, 0.58)
+
 func _laser_cloud_light_factor(world_pos: Vector2) -> float:
 	var pirate_factor: float = _laser_points_cloud_light(pirate_laser_points, pirate_fire_phase, pirate_fire_duration, world_pos)
 	var player_factor: float = _laser_points_cloud_light(player_laser_points, player_fire_phase, player_fire_duration, world_pos)
@@ -3101,20 +3384,48 @@ func _laser_points_cloud_light(points: Array[Vector2], phase: float, duration: f
 func _update_travel_route() -> void:
 	if travel_route_root == null:
 		return
-	for child in travel_route_root.get_children():
-		child.queue_free()
 	if not game.is_traveling and not bool(game.get("combat_mode")):
-		current_route_points.clear()
+		_clear_travel_route()
 		return
 	if not game.travel_target_pos.is_finite() or game.travel_destination_name == "":
-		current_route_points.clear()
+		_clear_travel_route()
 		return
+	var signature := _travel_route_signature()
+	travel_route_refresh_timer = max(0.0, travel_route_refresh_timer - get_process_delta_time())
+	if signature == travel_route_signature and travel_route_refresh_timer > 0.0:
+		return
+	travel_route_signature = signature
+	travel_route_refresh_timer = 0.10 if game.is_traveling else 0.35
+	for child in travel_route_root.get_children():
+		child.queue_free()
 	var route_points := _predict_vehicle_route()
 	if route_points.size() < 2:
 		current_route_points.clear()
 		return
 	current_route_points = route_points
 	_draw_dashed_polyline(route_points)
+
+func _clear_travel_route() -> void:
+	if current_route_points.is_empty() and travel_route_signature == "":
+		return
+	current_route_points.clear()
+	travel_route_signature = ""
+	travel_route_refresh_timer = 0.0
+	if travel_route_root != null:
+		for child in travel_route_root.get_children():
+			child.queue_free()
+
+func _travel_route_signature() -> String:
+	var pos_key := Vector2(round(game.player_pos.x / 16.0), round(game.player_pos.y / 16.0))
+	var target_key := Vector2(round(game.travel_target_pos.x / 16.0), round(game.travel_target_pos.y / 16.0))
+	var final_key := Vector2(round(game.travel_final_pos.x / 16.0), round(game.travel_final_pos.y / 16.0))
+	var speed_key := int(round(game.vehicle_current_speed / 20.0))
+	var angle_key := int(round(game.vehicle_angle * 12.0))
+	var waypoint_key := 0
+	for waypoint in game.travel_waypoints:
+		var point: Vector2 = waypoint
+		waypoint_key = int(fposmod(float(waypoint_key * 31) + point.x * 0.07 + point.y * 0.11, 100000.0))
+	return "%s|%s|%s|%d|%d|%d|%d|%s" % [pos_key, target_key, final_key, speed_key, angle_key, game.travel_waypoints.size(), waypoint_key, game.travel_destination_name]
 
 func _predict_vehicle_route() -> Array[Vector2]:
 	var points: Array[Vector2] = []

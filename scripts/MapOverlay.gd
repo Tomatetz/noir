@@ -273,11 +273,21 @@ func _draw_weapon_target_markers() -> void:
 	if map.game == null:
 		return
 	if map.pirate_active:
-		_draw_target_marker_at(map.pirate_pos, map.weapon_orders, "primary")
+		_draw_primary_pirate_target_markers()
 	for enemy in map.debug_pirates:
 		_draw_targeted_by(enemy.get("pos", Vector2.ZERO), enemy.get("targeted_by", []))
 	for car in map.friendly_cars:
 		_draw_targeted_by(car.get("pos", Vector2.ZERO), car.get("targeted_by", []))
+
+func _draw_primary_pirate_target_markers() -> void:
+	var weapons: Array = map.primary_pirate_targeted_by.duplicate()
+	for weapon_index in map.weapon_orders.keys():
+		var order: Dictionary = map.weapon_orders[weapon_index]
+		if str(order.get("id", "")) == "primary":
+			var index: int = int(weapon_index)
+			if not weapons.has(index):
+				weapons.append(index)
+	_draw_targeted_by(map.pirate_pos, weapons)
 
 func _draw_target_marker_at(world_pos: Vector2, orders: Dictionary, target_id: String) -> void:
 	var weapons := []
@@ -309,10 +319,22 @@ func _draw_hovered_vehicle_target() -> void:
 	if not Rect2(Vector2(-80.0, -80.0), size + Vector2(160.0, 160.0)).has_point(screen_pos):
 		return
 	var color := Color("#ff4b4b")
+	var weapons: Array = []
 	if target.get("type", "") == "friendly":
 		color = Color("#8fd7ff")
+	else:
+		weapons = map._enemy_weapons_for_target(target)
 	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.010)
 	var radius: float = lerp(31.0, 42.0, pulse)
+	for i in range(weapons.size()):
+		var weapon: Dictionary = weapons[i]
+		var weapon_color: Color = weapon.get("color", color)
+		var weapon_range: float = float(weapon.get("range", 0.0))
+		if weapon_range <= 0.0:
+			continue
+		var alpha: float = 0.46 + float(i) * 0.08
+		_draw_dashed_circle(screen_pos, weapon_range, Color(weapon_color.r, weapon_color.g, weapon_color.b, alpha))
+		draw_circle(screen_pos, weapon_range, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.010 + float(i) * 0.004))
 	draw_circle(screen_pos, radius + 14.0, Color(color.r, color.g, color.b, 0.055))
 	draw_circle(screen_pos, radius + 6.0, Color(color.r, color.g, color.b, 0.075))
 	draw_arc(screen_pos, radius, 0.0, TAU, 64, Color(color.r, color.g, color.b, 0.78), 2.0, true)
