@@ -45,6 +45,8 @@ var pirate_front_left_light: PointLight2D
 var pirate_front_right_light: PointLight2D
 var pirate_rear_left_light: PointLight2D
 var pirate_rear_right_light: PointLight2D
+var enemy_headlight_root: Node2D
+var enemy_headlight_cones: Array[Polygon2D] = []
 var pirate_laser_root: Node2D
 var pirate_laser_outer_glow: Line2D
 var pirate_laser_glow: Line2D
@@ -904,6 +906,11 @@ func _setup_pirate_node() -> void:
 		add_child(range_light)
 		weapon_range_lights.append(range_light)
 
+	enemy_headlight_root = Node2D.new()
+	enemy_headlight_root.z_index = 8
+	enemy_headlight_root.z_as_relative = false
+	add_child(enemy_headlight_root)
+
 	pirate_root = Node2D.new()
 	pirate_root.z_index = 11
 	pirate_root.z_as_relative = false
@@ -1194,10 +1201,12 @@ func _process(delta: float) -> void:
 	_update_vehicle_lights()
 	if not _is_active_map_view():
 		_despawn_pirate()
+		_ensure_enemy_headlight_cones(0)
 		_update_damage_popups(delta)
 		return
 	_update_pirate(delta)
 	_update_debug_pirates(delta)
+	_update_enemy_headlight_cones()
 	_update_auto_combat_trigger()
 	_update_damage_popups(delta)
 	_update_impact_sparks(delta)
@@ -1983,6 +1992,58 @@ func _update_debug_pirate_node(enemy: Dictionary) -> void:
 		return
 	root.position = _to_screen(enemy["pos"])
 	root.rotation = float(enemy["angle"]) + PI * 0.5
+
+func _ensure_enemy_headlight_cones(required_count: int) -> void:
+	if enemy_headlight_root == null:
+		return
+	while enemy_headlight_cones.size() < required_count:
+		var cone := Polygon2D.new()
+		cone.z_as_relative = false
+		var material := CanvasItemMaterial.new()
+		material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+		cone.material = material
+		enemy_headlight_root.add_child(cone)
+		enemy_headlight_cones.append(cone)
+	for i in range(enemy_headlight_cones.size()):
+		enemy_headlight_cones[i].visible = i < required_count
+
+func _enemy_headlight_polygon(length: float, spread: float, neck: float) -> PackedVector2Array:
+	return PackedVector2Array([
+		Vector2.ZERO,
+		Vector2(length * 0.18, -neck),
+		Vector2(length, -spread),
+		Vector2(length, spread),
+		Vector2(length * 0.18, neck)
+	])
+
+func _set_enemy_headlight_cone(cone: Polygon2D, world_pos: Vector2, angle: float, length: float, spread: float, neck: float, color: Color) -> void:
+	var forward := Vector2.RIGHT.rotated(angle)
+	cone.position = _to_screen(world_pos + forward * 32.0)
+	cone.rotation = angle
+	cone.polygon = _enemy_headlight_polygon(length, spread, neck)
+	cone.color = color
+	cone.visible = true
+
+func _update_enemy_headlight_cones() -> void:
+	if enemy_headlight_root == null:
+		return
+	var sources: Array[Dictionary] = []
+	if pirate_active and pirate_root != null and pirate_root.visible:
+		sources.append({"pos": pirate_pos, "angle": pirate_angle, "strength": 1.0})
+	for enemy in debug_pirates:
+		var root: Node2D = enemy.get("root", null) as Node2D
+		if is_instance_valid(root) and root.visible:
+			sources.append({"pos": enemy.get("pos", Vector2.ZERO), "angle": float(enemy.get("angle", 0.0)), "strength": 0.92})
+	_ensure_enemy_headlight_cones(sources.size() * 2)
+	for i in range(sources.size()):
+		var source := sources[i]
+		var pos: Vector2 = source["pos"]
+		var angle: float = float(source["angle"])
+		var strength: float = float(source["strength"])
+		var wide := enemy_headlight_cones[i * 2]
+		var core := enemy_headlight_cones[i * 2 + 1]
+		_set_enemy_headlight_cone(wide, pos, angle, 720.0, 240.0, 34.0, Color(1.0, 0.70, 0.34, 0.040 * strength))
+		_set_enemy_headlight_cone(core, pos, angle, 520.0, 82.0, 16.0, Color(1.0, 0.86, 0.56, 0.082 * strength))
 
 func _random_laser_color() -> Color:
 	var colors := [

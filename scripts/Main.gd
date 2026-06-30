@@ -126,9 +126,8 @@ func _process(delta: float) -> void:
 		return
 	var to_target = travel_target_pos - player_pos
 	var distance = to_target.length()
-	var is_final_leg: bool = travel_waypoints.size() == 0
-	var arrival_distance: float = CITY_GATE_ARRIVAL_DISTANCE if travel_target_district != -1 and is_final_leg else WAYPOINT_PASS_RADIUS
-	if distance <= arrival_distance:
+	var is_final_leg: bool = _is_final_travel_leg()
+	if distance <= _arrival_distance_for_current_leg():
 		map_panel.queue_redraw()
 		_reach_travel_point()
 		return
@@ -172,6 +171,14 @@ func _process(delta: float) -> void:
 	map_panel.queue_redraw()
 	if travel_progress >= 1.0:
 		_finish_travel()
+
+func _is_final_travel_leg() -> bool:
+	return travel_waypoints.is_empty()
+
+func _arrival_distance_for_current_leg() -> float:
+	if travel_target_district != -1 and _is_final_travel_leg():
+		return CITY_GATE_ARRIVAL_DISTANCE
+	return WAYPOINT_PASS_RADIUS
 
 func _build_world() -> void:
 	districts = [
@@ -887,13 +894,15 @@ func _check_mission_delivery() -> void:
 		accepted_missions.erase(m)
 
 func _travel(target: int, enter_after_arrival := false) -> void:
-	var entry_pos := _city_entry_pos(target, player_pos)
+	var route_origin := _route_order_origin()
+	var entry_pos := _city_entry_pos(target, route_origin)
 	_travel_to_point(entry_pos, target, districts[target].name, enter_after_arrival)
 
 func _travel_to_point(target_pos: Vector2, target_district := -1, destination_name := "точка маршрута", enter_after_arrival := false, suppress_arrival_event := false) -> void:
 	if not target_pos.is_finite():
 		return
-	if is_traveling and advance_one_turn:
+	if _is_combat_step_active():
+		_retarget_after_current_step(target_pos, target_district, destination_name, enter_after_arrival, suppress_arrival_event)
 		return
 	var wait_for_play: bool = combat_mode
 	var cost = _movement_cost(player_pos, target_pos)
@@ -903,32 +912,62 @@ func _travel_to_point(target_pos: Vector2, target_district := -1, destination_na
 		_log("Маршрут недоступен: корпус поврежден.")
 		_refresh()
 		return
-	travel_from = current_district
-	travel_to = target_district
-	travel_target_district = target_district
-	travel_start_pos = player_pos
-	travel_final_pos = target_pos
-	var route_waypoints: Array[Vector2] = _build_travel_waypoints(player_pos, target_pos, target_district)
-	travel_waypoints = _build_turn_waypoints(player_pos, route_waypoints)
-	travel_target_pos = _next_travel_target()
-	if travel_target_pos.distance_to(travel_start_pos) > 1.0:
-		vehicle_target_angle = (travel_target_pos - travel_start_pos).angle()
-		if not is_traveling or vehicle_velocity.length() < 1.0:
-			vehicle_current_speed = 0.0
-			vehicle_velocity = Vector2.ZERO
-	travel_destination_name = destination_name
-	travel_cost = cost
+	_start_travel_order(player_pos, target_pos, target_district, destination_name, cost, wait_for_play, enter_after_arrival, suppress_arrival_event)
+	modal_panel.visible = false
+	_log(("Маршрут выбран: %s. Нажмите PLAY для хода." if wait_for_play else "Машина сменила курс: %s.") % destination_name)
+	_refresh()
+
+func _is_combat_step_active() -> bool:
+	return is_traveling and advance_one_turn
+
+func _route_order_origin() -> Vector2:
+	if _is_combat_step_active() and travel_target_pos.is_finite():
+		return travel_target_pos
+	return player_pos
+
+func _start_travel_order(origin: Vector2, target_pos: Vector2, target_district: int, destination_name: String, cost: Dictionary, wait_for_play: bool, enter_after_arrival: bool, suppress_arrival_event: bool) -> void:
+	_assign_travel_order(target_pos, target_district, destination_name, cost, enter_after_arrival, suppress_arrival_event)
+	travel_start_pos = origin
+	_rebuild_remaining_route(origin, true)
+	_prime_vehicle_for_current_leg()
 	travel_progress = 0.0
 	travel_duration = max(0.1, travel_start_pos.distance_to(travel_target_pos) / vehicle_speed)
 	is_traveling = not wait_for_play
 	combat_mode = wait_for_play
 	at_location = false
+
+func _retarget_after_current_step(target_pos: Vector2, target_district: int, destination_name: String, enter_after_arrival: bool, suppress_arrival_event: bool) -> void:
+	var route_origin := _route_order_origin()
+	var cost: Dictionary = {} if suppress_arrival_event else _movement_cost(route_origin, target_pos)
+	_assign_travel_order(target_pos, target_district, destination_name, cost, enter_after_arrival, suppress_arrival_event)
+	_rebuild_remaining_route(route_origin, false)
+	_log("Новый маршрут принят после текущей контрольной точки: %s." % destination_name)
+	_refresh()
+
+func _assign_travel_order(target_pos: Vector2, target_district: int, destination_name: String, cost: Dictionary, enter_after_arrival: bool, suppress_arrival_event: bool) -> void:
+	travel_from = current_district
+	travel_to = target_district
+	travel_target_district = target_district
+	travel_final_pos = target_pos
+	travel_destination_name = destination_name
+	travel_cost = cost
 	open_location_after_travel = enter_after_arrival
 	travel_suppress_arrival_event = suppress_arrival_event
 	selected_district = target_district if target_district != -1 else selected_district
-	modal_panel.visible = false
-	_log(("Маршрут выбран: %s. Нажмите PLAY для хода." if wait_for_play else "Машина сменила курс: %s.") % destination_name)
-	_refresh()
+
+func _rebuild_remaining_route(origin: Vector2, take_next_target: bool) -> void:
+	var route_waypoints: Array[Vector2] = _build_travel_waypoints(origin, travel_final_pos, travel_target_district)
+	travel_waypoints = _build_turn_waypoints(origin, route_waypoints)
+	if take_next_target:
+		travel_target_pos = _next_travel_target()
+
+func _prime_vehicle_for_current_leg() -> void:
+	if travel_target_pos.distance_to(travel_start_pos) <= 1.0:
+		return
+	vehicle_target_angle = (travel_target_pos - travel_start_pos).angle()
+	if not is_traveling or vehicle_velocity.length() < 1.0:
+		vehicle_current_speed = 0.0
+		vehicle_velocity = Vector2.ZERO
 
 func _reach_travel_point() -> void:
 	if travel_waypoints.size() > 0:
@@ -1081,19 +1120,8 @@ func _finish_travel() -> void:
 		at_location = false
 		_field_event()
 		_log("Машина остановилась в точке %.0f / %.0f." % [player_pos.x, player_pos.y])
-	travel_from = -1
-	travel_to = -1
-	travel_target_district = -1
-	travel_waypoints.clear()
-	travel_progress = 0.0
-	travel_cost = {}
-	travel_destination_name = ""
-	travel_suppress_arrival_event = false
-	vehicle_velocity = Vector2.ZERO
-	vehicle_current_speed = 0.0
-	vehicle_previous_speed = 0.0
-	vehicle_is_braking = false
-	vehicle_steer = 0.0
+	_clear_travel_order()
+	_stop_vehicle(false)
 	if finished_combat_turn and map_panel != null:
 		if map_panel.has_method("_complete_combat_turn"):
 			map_panel.call("_complete_combat_turn")
@@ -1108,21 +1136,32 @@ func _finish_travel() -> void:
 
 func _cancel_bad_travel_state() -> void:
 	is_traveling = false
+	combat_mode = false
+	advance_one_turn = false
+	_clear_travel_order()
+	_stop_vehicle(false)
+	_log("Маршрут сброшен: навигация потеряла цель.")
+	_refresh()
+
+func _clear_travel_order() -> void:
 	travel_from = -1
 	travel_to = -1
 	travel_target_district = -1
+	travel_target_pos = Vector2.ZERO
+	travel_final_pos = Vector2.ZERO
 	travel_waypoints.clear()
 	travel_progress = 0.0
+	travel_duration = 1.0
 	travel_cost = {}
 	travel_destination_name = ""
 	travel_suppress_arrival_event = false
+
+func _stop_vehicle(braking := false) -> void:
 	vehicle_velocity = Vector2.ZERO
 	vehicle_current_speed = 0.0
 	vehicle_previous_speed = 0.0
-	vehicle_is_braking = false
+	vehicle_is_braking = braking
 	vehicle_steer = 0.0
-	_log("Маршрут сброшен: навигация потеряла цель.")
-	_refresh()
 
 func _road_event(target: int) -> void:
 	var danger = _route_danger(target)
@@ -1249,8 +1288,6 @@ func _log(text: String) -> void:
 	event_log.text = "[color=#9ad1d4]День %d[/color] %s\n%s" % [day, text, event_log.text]
 
 func _map_location_clicked(index: int) -> void:
-	if is_traveling and advance_one_turn:
-		return
 	selected_district = index
 	if not is_traveling and at_location and index == current_district:
 		_enter_location(index)
@@ -1265,9 +1302,8 @@ func _enter_location(index: int) -> void:
 	_refresh()
 
 func _map_point_clicked(world_pos: Vector2) -> void:
-	if is_traveling and advance_one_turn:
-		return
-	if player_pos.distance_to(world_pos) < MIN_FIELD_CLICK_DISTANCE:
+	var route_origin := _route_order_origin()
+	if route_origin.distance_to(world_pos) < MIN_FIELD_CLICK_DISTANCE:
 		return
 	_travel_to_point(world_pos, -1, "поле %.0f / %.0f" % [world_pos.x, world_pos.y], false)
 
@@ -1289,21 +1325,19 @@ func _pause_travel_turn(enter_combat := false) -> void:
 	var should_advance_cooldowns: bool = advance_one_turn and enter_combat
 	var remaining_target_pos: Vector2 = travel_final_pos
 	var remaining_target_district: int = travel_target_district
+	var remaining_destination_name := travel_destination_name
+	var remaining_cost: Dictionary = travel_cost.duplicate()
+	var remaining_enter_after_arrival := open_location_after_travel
+	var remaining_suppress_arrival := travel_suppress_arrival_event
 	is_traveling = false
 	if enter_combat:
 		combat_mode = true
 	advance_one_turn = false
+	_assign_travel_order(remaining_target_pos, remaining_target_district, remaining_destination_name, remaining_cost, remaining_enter_after_arrival, remaining_suppress_arrival)
 	travel_start_pos = player_pos
-	travel_final_pos = remaining_target_pos
-	travel_target_district = remaining_target_district
-	var route_waypoints: Array[Vector2] = _build_travel_waypoints(player_pos, travel_final_pos, travel_target_district)
-	travel_waypoints = _build_turn_waypoints(player_pos, route_waypoints)
-	travel_target_pos = _next_travel_target()
+	_rebuild_remaining_route(player_pos, true)
 	travel_progress = _route_progress()
-	vehicle_velocity = Vector2.ZERO
-	vehicle_current_speed = 0.0
-	vehicle_previous_speed = 0.0
-	vehicle_is_braking = true
+	_stop_vehicle(true)
 	_log("Боевой режим: мир замер до следующего приказа." if combat_mode else "Караван остановился. Мир замер до следующего приказа.")
 	_refresh()
 	if map_panel != null:
