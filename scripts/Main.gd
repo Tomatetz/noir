@@ -260,6 +260,15 @@ func _process(delta: float) -> void:
 	player_pos = safe_pos
 	if vehicle_blocked_time >= 0.9:
 		vehicle_blocked_time = 0.0
+		if travel_suppress_arrival_event:
+			is_traveling = false
+			combat_mode = false
+			advance_one_turn = false
+			_clear_travel_order()
+			_stop_vehicle(true)
+			_log("Выезд перекрыт. Караван остался в городе.")
+			_enter_location(current_district)
+			return
 		_log("Путь перекрыт другой машиной.")
 		_pause_travel_turn(advance_one_turn)
 		route_blocked_pos = player_pos
@@ -1098,18 +1107,20 @@ func _close_modal() -> void:
 		var exit_direction: Vector2 = _random_city_exit_direction()
 		var exit_radius := maxf(12.0, CITY_ENTRY_RADIUS - CITY_EXIT_START_OFFSET)
 		var exit_start := Vector2.INF
-		for i in range(8):
-			var direction := exit_direction.rotated(i * TAU / 8.0)
+		var exit_target := Vector2.INF
+		for i in range(CITY_ENTRY_DIRECTIONS.size()):
+			var direction := exit_direction.rotated(i * TAU / float(CITY_ENTRY_DIRECTIONS.size()))
 			var candidate := center + direction * exit_radius
-			if map_panel.call("vehicle_position_is_free", candidate):
+			var destination := center + direction * (CITY_ENTRY_RADIUS + CITY_EXIT_DRIVE_DISTANCE)
+			if map_panel.call("vehicle_corridor_is_free", candidate, destination):
 				exit_direction = direction
 				exit_start = candidate
+				exit_target = destination
 				break
 		if not exit_start.is_finite():
 			modal_panel.show()
 			_log("Выезд заблокирован машинами.")
 			return
-		var exit_target: Vector2 = center + exit_direction * (CITY_ENTRY_RADIUS + CITY_EXIT_DRIVE_DISTANCE)
 		player_pos = exit_start
 		vehicle_angle = exit_direction.angle()
 		vehicle_target_angle = vehicle_angle

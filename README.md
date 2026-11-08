@@ -1,54 +1,40 @@
-# 
+# Water Exchange
 
-Играбельный Godot 4.x прототип по мотивам `Космических Рейнджеров 2`
+A playable Godot prototype inspired by *Space Rangers 2*. In a near future reshaped by drought, water, electricity, and computing power drive the economy. You run a caravan between settlements while a corporate AI project threatens the region's water supply.
 
-## Установка и запуск
+## Gameplay
 
-### 1. Установите Godot
+- Trade supplies and take delivery contracts between settlements, each with its own prices and security risks.
+- Plan routes and fight turn-based vehicle battles. Move to the next checkpoint or hold your position to fire without moving.
+- Compare and buy vehicles in the showroom, then outfit and repair them in the garage. Chassis differ in speed, cargo capacity, and weapon mounts.
 
-Проект сделан под **Godot 4.7**. Скачайте Godot с официального сайта:
+The current in-game interface is in Russian.
 
-https://godotengine.org/download
+## Installation
 
-Подойдет обычная версия Godot 4.7 для вашей операционной системы. Дополнительные зависимости для прототипа не нужны.
+### 1. Install Godot
 
-### 2. Склонируйте проект
+Install the standard edition of [Godot 4.7](https://godotengine.org/download/) for your operating system. The prototype uses GDScript and requires no additional dependencies.
 
-```sh
-git clone git@github.com:Tomatetz/noir.git
-cd noir
-```
-
-Если SSH-доступ к GitHub не настроен, можно использовать HTTPS:
+### 2. Clone the repository
 
 ```sh
 git clone https://github.com/Tomatetz/noir.git
 cd noir
 ```
 
-### 3. Откройте проект в Godot
+If you use SSH with GitHub, you can clone with `git clone git@github.com:Tomatetz/noir.git` instead.
 
-1. Запустите Godot.
-2. Нажмите **Import**.
-3. Выберите файл `project.godot` в папке проекта.
-4. Откройте проект.
-5. Нажмите **Run Project** или запустите сцену `res://scenes/Main.tscn`.
+### 3. Run the game
 
-Проект настроен на запуск главной сцены автоматически:
+In the Godot Project Manager, choose **Import**, select `project.godot`, and open the project. Press **F5** or click **Run Project** to start the main scene, `res://scenes/Main.tscn`.
 
-```text
-res://scenes/Main.tscn
-```
-
-### 4. Запуск из терминала
-
-Если Godot доступен из терминала:
-
+If `godot` is available on your command line, you can also run the game from the repository directory:
 ```sh
 godot --path .
 ```
 
-Для быстрой проверки скриптов:
+For a quick script check without opening a window:
 
 ```sh
 godot --headless --path . --check-only --script res://scripts/MapPanel.gd

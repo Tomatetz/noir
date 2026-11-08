@@ -577,9 +577,10 @@ func _clear_vehicle_step(origin: Vector2, destination: Vector2, obstacles: Packe
 func limit_player_motion(origin: Vector2, destination: Vector2) -> Vector2:
 	return _clear_vehicle_step(origin, destination, _vehicle_obstacles(null, false))
 
-func vehicle_position_is_free(point: Vector2) -> bool:
+func vehicle_corridor_is_free(start: Vector2, finish: Vector2) -> bool:
 	for center in _vehicle_obstacles(null, false):
-		if point.distance_squared_to(center) < VEHICLE_CLEARANCE * VEHICLE_CLEARANCE:
+		var closest := Geometry2D.get_closest_point_to_segment(center, start, finish)
+		if closest.distance_squared_to(center) <= VEHICLE_CLEARANCE * VEHICLE_CLEARANCE:
 			return false
 	return true
 
