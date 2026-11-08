@@ -42,6 +42,7 @@ var districts := []
 var routes := {}
 var current_district := 0
 var credits := 520
+const DEBUG_UNLIMITED_CREDITS := true
 var day := 1
 var capacity := 18
 var hull := 100
@@ -60,6 +61,9 @@ var at_location := true
 var is_traveling := false
 var combat_mode := false
 var advance_one_turn := false
+var hold_turn_time := 0.0
+var route_blocked_pos := Vector2.INF
+var trial_ambush_pending := false
 var travel_from := -1
 var travel_to := -1
 var travel_target_district := -1
@@ -84,6 +88,7 @@ var vehicle_steer := 0.0
 var vehicle_max_steer := 0.62
 var vehicle_steer_rate := 1.65
 var vehicle_wheelbase := 58.0
+var vehicle_blocked_time := 0.0
 var rng := RandomNumberGenerator.new()
 
 var root_split: HSplitContainer
@@ -96,7 +101,69 @@ var fullscreen_map_panel: PanelContainer
 var fullscreen_map_view: Control
 var pause_menu_panel: Control
 var right_tabs: TabContainer
-var status_label: Label
+var status_values: Array[Label] = []
+var status_strip: PanelContainer
+const GARAGE_KITS := [
+	{"name": "Парная ракетная кассета", "price": 120, "mass": 34, "space": 1, "range": 500.0, "rate": 2.0, "count": 2},
+	{"name": "Лёгкая ракетная кассета", "price": 85, "mass": 22, "space": 0, "range": 440.0, "rate": 1.0, "count": 1},
+	{"name": "Усиленная ракетная кассета", "price": 180, "mass": 48, "space": 2, "range": 590.0, "rate": 3.0, "count": 3},
+	{"name": "Двухствольный миномёт", "price": 210, "mass": 52, "space": 2, "range": 640.0, "rate": 3.0, "count": 2, "min_damage": 16, "max_damage": 22, "mortar": true},
+]
+var garage_installed := 0
+var garage_selected := 0
+const GARAGE_TURRETS := [
+	{"name": "Лазерная турель", "price": 95, "mass": 0, "space": 0, "range": 360.0, "rate": 1.0, "min_damage": 5, "max_damage": 9},
+	{"name": "Дальнобойный лазер", "price": 160, "mass": 18, "space": 0, "range": 520.0, "rate": 2.0, "min_damage": 9, "max_damage": 14},
+	{"name": "Автоматическая пушка", "price": 145, "mass": 26, "space": 0, "range": 290.0, "rate": 1.0, "min_damage": 8, "max_damage": 12, "cannon": true},
+	{"name": "Импульсный излучатель", "price": 170, "mass": 24, "space": 0, "range": 250.0, "rate": 2.0, "min_damage": 13, "max_damage": 19, "pulse": true},
+	{"name": "Рельсовая пушка", "price": 235, "mass": 40, "space": 1, "range": 670.0, "rate": 3.0, "min_damage": 24, "max_damage": 31, "rail": true},
+	{"name": "Дробовая турель", "price": 155, "mass": 30, "space": 0, "range": 185.0, "rate": 2.0, "min_damage": 20, "max_damage": 27, "shotgun": true},
+]
+var garage_turret_installed := 0
+var garage_turret_slot := false
+var garage_aux_selected := false
+var garage_aux_installed := -1
+var garage_extra_selected := false
+var garage_extra_installed := false
+const GARAGE_TAB := 2
+const SHOWROOM_TAB := 5
+var showroom_model := "pickup"
+var showroom_body: TextureRect
+var showroom_title: Label
+var showroom_details: Label
+var showroom_action: Button
+var inspection_bay_texture: Texture2D
+var garage_slot_heading: Label
+var garage_options: Array[Button] = []
+var garage_slot_buttons: Array[Button] = []
+var garage_module_views: Array[TextureRect] = []
+var garage_hovered_slot := -1
+var garage_title: Label
+var garage_resources: Label
+var garage_stats: GridContainer
+var garage_stat_values: Array[Label] = []
+var garage_install: Button
+var garage_remove: Button
+var garage_repair: Button
+var van_owned := false
+var showroom_rows: Dictionary = {}
+var garage_option_labels: Array[Array] = []
+var active_body := "pickup"
+var body_cargo_bonus := 0
+var owned_bodies := {"pickup": true}
+const BODY_CATALOG := {
+	"pickup": ["Пикап", 0, 0, 1420],
+	"van": ["Фургон водной службы", 420, 8, 1950],
+	"gt": ["Бордовый GT", 640, -4, 1320],
+	"minibus": ["Микроавтобус", 570, 12, 2180],
+}
+var garage_preview: Control
+const DASHBOARD_ICONS := [
+	"<path d='M5 3h10l4 4v14H5z M15 3v5h4 M8 11h8 M8 15h8 M8 18h5'/>",
+	"<ellipse cx='12' cy='6' rx='8' ry='3'/><path d='M4 6v12c0 4 16 4 16 0V6 M4 10c0 4 16 4 16 0 M4 14c0 4 16 4 16 0'/>",
+	"<circle cx='5' cy='18' r='2'/><path d='M7 18h6a3 3 0 0 0 0-6h-2a3 3 0 0 1 0-6h4 M16 3l4 3-4 3'/>",
+	"<rect x='5' y='5' width='14' height='16' rx='2'/><rect x='9' y='3' width='6' height='4' rx='1'/><path d='m8 12 1 1 2-2 M13 12h3 m-8 5 1 1 2-2 M13 17h3'/>",
+]
 var location_label: Label
 var district_info: RichTextLabel
 var event_log: RichTextLabel
@@ -119,8 +186,20 @@ func _ready() -> void:
 	_refresh()
 
 func _process(delta: float) -> void:
+	if hold_turn_time > 0.0:
+		hold_turn_time = maxf(0.0, hold_turn_time - delta)
+		if hold_turn_time == 0.0:
+			if map_panel.call("has_turn_fire_in_flight"):
+				hold_turn_time = 0.05
+			else:
+				combat_mode = hull > 0 and bool(map_panel.call("_has_active_combat_targets"))
+		return
 	if not is_traveling:
 		return
+	if trial_ambush_pending and travel_target_district == 1 and player_pos.distance_to(districts[0].pos) > 330.0:
+		trial_ambush_pending = false
+		map_panel.call("_spawn_debug_pirate")
+		_log("На трассе к Сухому Порту замечены пираты.")
 	if not travel_target_pos.is_finite() or not player_pos.is_finite():
 		_cancel_bad_travel_state()
 		return
@@ -141,18 +220,23 @@ func _process(delta: float) -> void:
 	vehicle_steer = move_toward(vehicle_steer, steer_target, vehicle_steer_rate * delta)
 
 	var turn_pressure = abs(angle_delta) / PI
-	var target_speed: float = vehicle_speed if not is_final_leg else min(vehicle_speed, max(28.0, distance * 1.15))
+	var cruise_speed := _body_cruise_speed(active_body)
+	var target_speed: float = cruise_speed if not is_final_leg else minf(cruise_speed, maxf(28.0, distance * 1.15))
 	if turn_pressure > 0.42:
 		target_speed *= 0.45
+	if distance < 155.0 and absf(angle_delta) > 0.45:
+		target_speed = minf(target_speed, 48.0)
 	if is_final_leg and distance < 90.0:
 		target_speed = min(target_speed, max(22.0, distance * 0.9))
 	var rate = vehicle_brake if vehicle_current_speed > target_speed else vehicle_acceleration
+	if (active_body == "van" or active_body == "minibus") and vehicle_current_speed < target_speed:
+		rate *= 0.72
 	vehicle_previous_speed = vehicle_current_speed
 	vehicle_current_speed = move_toward(vehicle_current_speed, target_speed, rate * delta)
 	vehicle_is_braking = vehicle_current_speed < vehicle_previous_speed - 0.5 or target_speed < vehicle_previous_speed - 8.0
 
 	if abs(vehicle_steer) > 0.01 and vehicle_current_speed > 1.0:
-		vehicle_angle += (vehicle_current_speed / vehicle_wheelbase) * tan(vehicle_steer) * delta
+		vehicle_angle += route_turn_rate(vehicle_current_speed, vehicle_steer, distance) * delta
 
 	var forward = Vector2.RIGHT.rotated(vehicle_angle)
 	var projected_distance = to_target.dot(forward)
@@ -162,18 +246,34 @@ func _process(delta: float) -> void:
 		return
 	vehicle_velocity = forward * vehicle_current_speed
 	var step = max(1.0, vehicle_current_speed * delta)
+	var next_pos := player_pos + vehicle_velocity * delta
 	if distance <= step:
-		player_pos += to_target.normalized() * max(0.0, distance - 7.0)
-		travel_progress = _route_progress()
+		next_pos = player_pos + to_target.normalized() * max(0.0, distance - 7.0)
+	var safe_pos: Vector2 = map_panel.call("limit_player_motion", player_pos, next_pos)
+	if safe_pos.distance_squared_to(next_pos) > 0.000001:
+		vehicle_velocity = (safe_pos - player_pos) / maxf(delta, 0.001)
+		vehicle_current_speed = vehicle_velocity.length()
+		vehicle_is_braking = true
+		vehicle_blocked_time += delta
 	else:
-		player_pos += vehicle_velocity * delta
-		travel_progress = _route_progress()
+		vehicle_blocked_time = maxf(0.0, vehicle_blocked_time - delta)
+	player_pos = safe_pos
+	if vehicle_blocked_time >= 0.9:
+		vehicle_blocked_time = 0.0
+		_log("Путь перекрыт другой машиной.")
+		_pause_travel_turn(advance_one_turn)
+		route_blocked_pos = player_pos
+		return
+	travel_progress = _route_progress()
 	map_panel.queue_redraw()
-	if travel_progress >= 1.0:
-		_finish_travel()
 
 func _is_final_travel_leg() -> bool:
 	return travel_waypoints.is_empty()
+
+func route_turn_rate(speed: float, steer: float, distance: float) -> float:
+	# Close-range maneuvering needs a smaller turning circle than the arrival zone.
+	var wheelbase := lerpf(vehicle_wheelbase * 0.48, vehicle_wheelbase, smoothstep(95.0, 155.0, distance))
+	return speed / wheelbase * tan(steer)
 
 func _arrival_distance_for_current_leg() -> float:
 	if travel_target_district != -1 and _is_final_travel_leg():
@@ -200,6 +300,7 @@ func _build_world() -> void:
 		6: [0, 5]
 	}
 	_generate_missions()
+	missions.push_front({"from": 0, "to": 1, "good": "meds", "amount": 6, "reward": 560, "deadline": 4, "name": "Медикаменты для Сухого Порта", "ambush": true})
 
 func _build_ui() -> void:
 	var bg := ColorRect.new()
@@ -216,16 +317,29 @@ func _build_ui() -> void:
 	frame.offset_bottom = -10
 	add_child(frame)
 
+	status_strip = PanelContainer.new()
+	status_strip.custom_minimum_size.y = 32
+	status_strip.material = _hud_material()
+	status_strip.add_theme_stylebox_override("panel", _hud_style(Color("#171c1e"), Color("#424a4c"), 0))
+	frame.add_child(status_strip)
 	var top := HBoxContainer.new()
-	top.custom_minimum_size = Vector2(0, 40)
-	frame.add_child(top)
-
-	status_label = Label.new()
-	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	status_label.add_theme_font_size_override("font_size", 13)
-	status_label.add_theme_color_override("font_color", Color("#cfd8dc"))
-	top.add_child(status_label)
+	top.use_parent_material = true
+	status_strip.add_child(top)
+	for i in range(6):
+		if i > 0:
+			var separator := VSeparator.new()
+			separator.use_parent_material = true
+			top.add_child(separator)
+		var value := Label.new()
+		value.use_parent_material = true
+		value.mouse_filter = Control.MOUSE_FILTER_PASS
+		value.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		value.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		value.add_theme_font_size_override("font_size", 13)
+		value.add_theme_color_override("font_color", Color("#dce4e2"))
+		top.add_child(value)
+		status_values.append(value)
 
 	map_panel = Panel.new()
 	map_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -255,9 +369,17 @@ func _input(event: InputEvent) -> void:
 		else:
 			_open_pause_menu()
 			get_viewport().set_input_as_handled()
-	elif event is InputEventKey and event.pressed and event.keycode == KEY_SPACE:
+	elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_SPACE:
+		if modal_panel.visible or fullscreen_map_panel.visible or (pause_menu_panel != null and pause_menu_panel.visible):
+			return
 		if is_traveling:
 			_pause_travel_turn(false)
+			get_viewport().set_input_as_handled()
+		elif can_play_turn():
+			_play_combat_turn()
+			get_viewport().set_input_as_handled()
+		elif can_hold_turn():
+			_hold_combat_turn()
 			get_viewport().set_input_as_handled()
 
 func _build_dashboard() -> void:
@@ -281,12 +403,14 @@ func _build_dashboard() -> void:
 	dashboard_bar.add_theme_constant_override("separation", 6)
 	panel.add_child(dashboard_bar)
 
-	_add_dashboard_button("i", "Сводка", 0)
-	_add_dashboard_button("$", "Биржа", 1)
-	_add_dashboard_button(">", "Маршруты", 2)
-	_add_dashboard_button("#", "Контракты", 3)
+	panel.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+	_add_dashboard_button("Сводка", 0)
+	_add_dashboard_button("Биржа", 1)
+	_add_dashboard_button("Маршруты", 3)
+	_add_dashboard_button("Контракты", 4)
 
 	dashboard_tooltip = Label.new()
+	dashboard_tooltip.material = _hud_material()
 	dashboard_tooltip.z_index = 81
 	dashboard_tooltip.visible = false
 	dashboard_tooltip.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
@@ -300,9 +424,31 @@ func _build_dashboard() -> void:
 	dashboard_tooltip.add_theme_color_override("font_color", Color("#e7ecef"))
 	add_child(dashboard_tooltip)
 
-func _add_dashboard_button(icon: String, title: String, tab_index: int) -> void:
+func _hud_material() -> CanvasItemMaterial:
+	var material := CanvasItemMaterial.new()
+	material.light_mode = CanvasItemMaterial.LIGHT_MODE_UNSHADED
+	return material
+
+func _hud_style(fill: Color, border: Color, radius: int) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = fill
+	style.border_color = border
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(radius)
+	return style
+
+func _add_dashboard_button(title: String, tab_index: int) -> void:
 	var button := Button.new()
-	button.text = icon
+	var glyph := Image.new()
+	var svg := "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='#dce4e2' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'>%s</svg>"
+	var icon_index := tab_index - 1 if tab_index > 2 else tab_index
+	if glyph.load_svg_from_string(svg % DASHBOARD_ICONS[icon_index]) == OK:
+		button.icon = ImageTexture.create_from_image(glyph)
+	button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	button.material = _hud_material()
+	button.add_theme_stylebox_override("normal", _hud_style(Color("#171c1e", 0.94), Color("#596466"), 5))
+	button.add_theme_stylebox_override("hover", _hud_style(Color("#263536"), Color("#92c6b8"), 5))
+	button.add_theme_stylebox_override("pressed", _hud_style(Color("#304541"), Color("#a6e1cd"), 5))
 	button.tooltip_text = title
 	button.custom_minimum_size = Vector2(46, 42)
 	button.add_theme_font_size_override("font_size", 18)
@@ -322,6 +468,7 @@ func _build_modal() -> void:
 	_ensure_modal_layer()
 	modal_panel = PanelContainer.new()
 	modal_panel.visible = false
+	modal_panel.add_theme_stylebox_override("panel", _hud_style(Color("#141819"), Color("#424a4c"), 0))
 	modal_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	modal_panel.offset_left = 0
 	modal_panel.offset_top = 0
@@ -345,12 +492,15 @@ func _build_modal() -> void:
 	var header := HBoxContainer.new()
 	box.add_child(header)
 
-	var title := Label.new()
-	title.text = "Панель каравана"
-	title.add_theme_font_size_override("font_size", 20)
-	title.add_theme_color_override("font_color", Color("#e7ecef"))
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(title)
+	garage_title = Label.new()
+	garage_title.add_theme_font_size_override("font_size", 20)
+	garage_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(garage_title)
+	garage_resources = Label.new()
+	garage_resources.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	garage_resources.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	garage_resources.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	header.add_child(garage_resources)
 
 	var close_button := Button.new()
 	close_button.text = "x"
@@ -367,15 +517,577 @@ func _build_modal() -> void:
 
 	_build_overview_tab()
 	_build_market_tab()
+	_build_garage_tab()
 	_build_travel_tab()
 	_build_mission_tab()
+	_build_showroom_tab()
+	var exit_button := Button.new()
+	exit_button.text = "Выехать из города"
+	exit_button.size_flags_horizontal = Control.SIZE_SHRINK_END
+	exit_button.pressed.connect(_close_modal)
+	box.add_child(exit_button)
+	right_tabs.set_meta("exit_button", exit_button)
 
 func _open_modal(tab_index: int) -> void:
 	fullscreen_map_panel.visible = false
 	if pause_menu_panel != null:
 		pause_menu_panel.visible = false
 	modal_panel.visible = true
+	right_tabs.set_tab_hidden(GARAGE_TAB, not at_location)
+	right_tabs.set_tab_hidden(SHOWROOM_TAB, not at_location)
 	right_tabs.current_tab = tab_index
+	_refresh_garage()
+
+func _build_garage_tab() -> void:
+	var row := HBoxContainer.new()
+	row.name = "Гараж"
+	row.add_theme_constant_override("separation", 20)
+	right_tabs.add_child(row)
+	garage_preview = Control.new()
+	garage_preview.clip_contents = true
+	garage_preview.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	garage_preview.size_flags_stretch_ratio = 1.45
+	row.add_child(garage_preview)
+	_add_inspection_floor(garage_preview, true)
+	for i in range(4):
+		var module_view := TextureRect.new()
+		module_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		module_view.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		var module_material := ShaderMaterial.new()
+		module_material.shader = preload("res://assets/garage-module.gdshader")
+		module_view.material = module_material
+		garage_preview.add_child(module_view)
+		garage_module_views.append(module_view)
+	garage_preview.draw.connect(_draw_garage_preview)
+	garage_preview.resized.connect(garage_preview.queue_redraw)
+	for i in range(4):
+		var slot := Button.new()
+		slot.flat = true
+		slot.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		slot.tooltip_text = "Слот турели" if i == 0 else "Слот ракетной кассеты"
+		slot.pressed.connect(_select_garage_slot.bind(i))
+		slot.mouse_entered.connect(_set_garage_hover.bind(i))
+		slot.mouse_exited.connect(_set_garage_hover.bind(-1))
+		garage_preview.add_child(slot)
+		garage_slot_buttons.append(slot)
+	garage_preview.resized.connect(_layout_garage_slots)
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var style := _hud_style(Color("#191e20"), Color("#41494b"), 6)
+	style.content_margin_left = 16
+	style.content_margin_right = 16
+	style.content_margin_top = 12
+	style.content_margin_bottom = 12
+	panel.add_theme_stylebox_override("panel", style)
+	row.add_child(panel)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	panel.add_child(scroll)
+	var box := VBoxContainer.new()
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_theme_constant_override("separation", 8)
+	scroll.add_child(box)
+	garage_slot_heading = Label.new()
+	garage_slot_heading.add_theme_font_size_override("font_size", 20)
+	box.add_child(garage_slot_heading)
+	var options := ButtonGroup.new()
+	var catalog_rows := VBoxContainer.new()
+	catalog_rows.add_theme_constant_override("separation", 0)
+	box.add_child(catalog_rows)
+	for i in range(maxi(GARAGE_KITS.size(), GARAGE_TURRETS.size())):
+		var option := Button.new()
+		option.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		option.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		option.custom_minimum_size.y = 42
+		option.toggle_mode = true
+		option.add_theme_stylebox_override("normal", _hud_style(Color("#1c2021"), Color("#393e40"), 0))
+		option.add_theme_stylebox_override("hover", _hud_style(Color("#292f30"), Color("#586763"), 0))
+		var selected_style := _hud_style(Color("#23312e"), Color("#83e6d0"), 0)
+		selected_style.border_width_left = 4
+		option.add_theme_stylebox_override("pressed", selected_style)
+		option.button_group = options
+		option.button_pressed = i == garage_selected
+		option.pressed.connect(func():
+			garage_selected = i
+			_refresh_garage()
+		)
+		catalog_rows.add_child(option)
+		var columns := HBoxContainer.new()
+		columns.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		option.add_child(columns)
+		columns.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		columns.offset_left = 12
+		columns.offset_right = -10
+		var labels: Array[Label] = []
+		for column in range(4):
+			var label := Label.new()
+			label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			label.custom_minimum_size.x = [32, 0, 54, 62][column]
+			if column == 1:
+				label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			elif column > 1:
+				label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			if column == 3:
+				label.add_theme_color_override("font_color", Color("#edb75e"))
+			columns.add_child(label)
+			labels.append(label)
+		garage_option_labels.append(labels)
+		garage_options.append(option)
+	box.add_child(HSeparator.new())
+	var comparison := Label.new()
+	comparison.text = "Предпросмотр установки"
+	comparison.add_theme_font_size_override("font_size", 17)
+	box.add_child(comparison)
+	garage_stats = GridContainer.new()
+	garage_stats.columns = 3
+	garage_stats.add_theme_constant_override("v_separation", 0)
+	garage_stats.add_theme_constant_override("h_separation", 0)
+	box.add_child(garage_stats)
+	for caption in ["", "Сейчас", "После установки", "Масса машины", "", "", "Место под груз", "", "", "Дальность", "", "", "Перезарядка", "", "", "Урон за залп", "", ""]:
+		var cell := Label.new()
+		cell.text = caption
+		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tile := PanelContainer.new()
+		tile.custom_minimum_size.y = 27
+		tile.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var cell_style := _hud_style(Color("#1c2021"), Color("#3b4243"), 0)
+		cell_style.content_margin_left = 8
+		cell_style.content_margin_right = 8
+		tile.add_theme_stylebox_override("panel", cell_style)
+		if garage_stat_values.size() % 3 != 0:
+			cell.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		garage_stats.add_child(tile)
+		tile.add_child(cell)
+		garage_stat_values.append(cell)
+	garage_install = Button.new()
+	garage_install.custom_minimum_size.y = 38
+	garage_install.add_theme_stylebox_override("normal", _hud_style(Color("#203430"), Color("#83e6d0"), 5))
+	garage_install.pressed.connect(func(): _fit_garage_kit(garage_selected))
+	box.add_child(garage_install)
+	var actions := HBoxContainer.new()
+	box.add_child(actions)
+	garage_remove = Button.new()
+	garage_remove.text = "Снять кассету"
+	garage_remove.pressed.connect(func(): _fit_garage_kit(-1))
+	actions.add_child(garage_remove)
+	garage_repair = Button.new()
+	garage_repair.text = "Ремонт · 40 C"
+	garage_repair.pressed.connect(_repair)
+	actions.add_child(garage_repair)
+
+func _build_showroom_tab() -> void:
+	var row := HBoxContainer.new()
+	row.name = "Автосалон"
+	row.add_theme_constant_override("separation", 16)
+	right_tabs.add_child(row)
+	var list := VBoxContainer.new()
+	list.custom_minimum_size.x = 218
+	list.add_theme_constant_override("separation", 6)
+	row.add_child(list)
+	var heading := Label.new()
+	heading.text = "Кузова"
+	heading.add_theme_font_size_override("font_size", 20)
+	list.add_child(heading)
+	for model in BODY_CATALOG:
+		var button := Button.new()
+		button.toggle_mode = true
+		button.custom_minimum_size.y = 62
+		button.add_theme_stylebox_override("pressed", _hud_style(Color("#203430"), Color("#83e6d0"), 5))
+		button.pressed.connect(_select_showroom_model.bind(model))
+		list.add_child(button)
+		var content := HBoxContainer.new()
+		content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		button.add_child(content)
+		content.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 6)
+		var thumbnail := TextureRect.new()
+		thumbnail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		thumbnail.custom_minimum_size = Vector2(44, 48)
+		thumbnail.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		thumbnail.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		thumbnail.texture = _showroom_texture(model)
+		content.add_child(thumbnail)
+		var labels := VBoxContainer.new()
+		labels.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		labels.alignment = BoxContainer.ALIGNMENT_CENTER
+		content.add_child(labels)
+		var title := Label.new()
+		title.text = BODY_CATALOG[model][0]
+		labels.add_child(title)
+		var status := Label.new()
+		status.add_theme_font_size_override("font_size", 13)
+		labels.add_child(status)
+		showroom_rows[model] = [button, status]
+
+	var bay := Control.new()
+	bay.clip_contents = true
+	bay.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(bay)
+	_add_inspection_floor(bay)
+	showroom_body = TextureRect.new()
+	showroom_body.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	showroom_body.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	bay.add_child(showroom_body)
+	showroom_body.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 24)
+
+	var details := VBoxContainer.new()
+	details.custom_minimum_size.x = 230
+	details.add_theme_constant_override("separation", 12)
+	row.add_child(details)
+	showroom_title = Label.new()
+	showroom_title.add_theme_font_size_override("font_size", 20)
+	details.add_child(showroom_title)
+	details.add_child(HSeparator.new())
+	showroom_details = Label.new()
+	showroom_details.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	showroom_details.add_theme_color_override("font_color", Color("#bac7c5"))
+	details.add_child(showroom_details)
+	showroom_action = Button.new()
+	showroom_action.custom_minimum_size.y = 38
+	showroom_action.add_theme_stylebox_override("normal", _hud_style(Color("#203430"), Color("#83e6d0"), 5))
+	showroom_action.pressed.connect(func(): _select_garage_body(showroom_model))
+	details.add_child(showroom_action)
+
+func _add_inspection_floor(parent: Control, behind_parent := false) -> void:
+	const BAY_PATH := "res://assets/inspection-bay.png"
+	if inspection_bay_texture == null:
+		if ResourceLoader.exists(BAY_PATH):
+			inspection_bay_texture = load(BAY_PATH) as Texture2D
+		else:
+			var floor_image := Image.load_from_file(BAY_PATH)
+			if floor_image != null and not floor_image.is_empty():
+				inspection_bay_texture = ImageTexture.create_from_image(floor_image)
+	var floor_view := TextureRect.new()
+	floor_view.texture = inspection_bay_texture
+	floor_view.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	floor_view.show_behind_parent = behind_parent
+	floor_view.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	floor_view.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	parent.add_child(floor_view)
+	floor_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+func _showroom_texture(model: String) -> Texture2D:
+	var texture: Texture2D = map_panel.get(model + "_texture")
+	return texture if texture != null or model != "pickup" else map_panel.get("car_texture")
+
+func _select_showroom_model(model: String) -> void:
+	showroom_model = model
+	_refresh_showroom()
+
+func _refresh_showroom() -> void:
+	for model in showroom_rows:
+		var entry: Array = showroom_rows[model]
+		var owned := owned_bodies.has(model)
+		entry[0].set_pressed_no_signal(model == showroom_model)
+		entry[1].text = "В строю" if model == active_body else ("В гараже" if owned else "%d C" % BODY_CATALOG[model][1])
+		entry[1].modulate = Color("#83e6d0") if owned else Color("#e3bd82")
+	var data: Array = BODY_CATALOG[showroom_model]
+	var current := showroom_model == active_body
+	var owned := owned_bodies.has(showroom_model)
+	var new_capacity := _garage_body_capacity(showroom_model)
+	var fits := _cargo_used() <= new_capacity
+	showroom_body.texture = _showroom_texture(showroom_model)
+	showroom_title.text = data[0]
+	var before: Array = BODY_CATALOG[active_body]
+	showroom_details.text = "В строю → Выбранный\n\nМасса: %d → %d кг\nГруз: %d / %d → %d\nСкорость: %d → %d\nТурели: %d → %d\nГрузовые слоты: %d → %d" % [before[3], data[3], _cargo_used(), capacity, new_capacity, _body_cruise_speed(active_body), _body_cruise_speed(showroom_model), 1 if active_body == "pickup" else 2, 1 if showroom_model == "pickup" else 2, 2 if active_body == "gt" else 1, 2 if showroom_model == "gt" else 1]
+	var moved := PackedStringArray()
+	var stored := PackedStringArray()
+	if garage_turret_installed >= 0:
+		moved.append(GARAGE_TURRETS[garage_turret_installed].name)
+	if garage_installed >= 0:
+		moved.append(GARAGE_KITS[garage_installed].name)
+	if garage_aux_installed >= 0:
+		if showroom_model == "pickup":
+			stored.append(GARAGE_TURRETS[garage_aux_installed].name)
+		else:
+			moved.append(GARAGE_TURRETS[garage_aux_installed].name)
+	if garage_extra_installed:
+		if showroom_model == "gt":
+			moved.append("Правая ракетная кассета")
+		else:
+			stored.append("Правая ракетная кассета")
+	if not current and not moved.is_empty():
+		showroom_details.text += "\n\nПереедет:\n" + "\n".join(moved)
+	if not current and not stored.is_empty():
+		showroom_details.text += "\n\nОстанется в гараже:\n" + "\n".join(stored)
+	showroom_action.text = "В строю" if current else ("Пересесть" if owned else "Купить за %d C" % data[1])
+	showroom_action.disabled = current or not at_location or not fits or (not owned and not _can_afford(int(data[1])))
+	showroom_action.tooltip_text = "Груз не помещается" if not fits else ""
+
+func _body_cruise_speed(model: String) -> float:
+	return vehicle_speed * (1.18 if model == "gt" else (0.84 if model in ["van", "minibus"] else 1.0))
+
+func _garage_body_capacity(model: String) -> int:
+	var result := capacity - body_cargo_bonus + int(BODY_CATALOG[model][2])
+	if garage_extra_installed:
+		result += int(GARAGE_KITS[0].space) * (int(active_body == "gt") - int(model == "gt"))
+	if garage_aux_installed >= 0:
+		result += int(GARAGE_TURRETS[garage_aux_installed].space) * (int(active_body != "pickup") - int(model != "pickup"))
+	return result
+
+func _select_garage_body(model: String) -> void:
+	if not BODY_CATALOG.has(model):
+		return
+	var data: Array = BODY_CATALOG[model]
+	var price: int = 0 if owned_bodies.has(model) else int(data[1])
+	var new_capacity := _garage_body_capacity(model)
+	if not at_location or model == active_body or not _can_afford(price) or _cargo_used() > new_capacity:
+		return
+	if not map_panel.call("equip_player_body", model):
+		return
+	_spend_credits(price)
+	owned_bodies[model] = true
+	active_body = model
+	body_cargo_bonus = int(data[2])
+	capacity = new_capacity
+	van_owned = model != "pickup"
+	map_panel.call("configure_aux_laser", GARAGE_TURRETS[garage_aux_installed] if garage_aux_installed >= 0 and van_owned else {})
+	map_panel.call("configure_extra_rockets", garage_extra_installed and model == "gt")
+	_select_garage_slot(0)
+
+func _select_garage_slot(index: int) -> void:
+	garage_aux_selected = index == 2
+	garage_extra_selected = index == 3
+	garage_turret_slot = index == 0 or index == 2
+	garage_selected = maxi(0, _garage_current_module())
+	_refresh_garage()
+
+func _garage_catalog() -> Array:
+	if garage_extra_selected:
+		return [GARAGE_KITS[0]]
+	return GARAGE_TURRETS if garage_turret_slot else GARAGE_KITS
+
+func _garage_current_module() -> int:
+	if garage_aux_selected:
+		return garage_aux_installed
+	if garage_extra_selected:
+		return 0 if garage_extra_installed else -1
+	return garage_turret_installed if garage_turret_slot else garage_installed
+
+func _set_garage_hover(index: int) -> void:
+	garage_hovered_slot = index
+	_layout_garage_slots()
+	garage_preview.queue_redraw()
+
+func _layout_garage_slots() -> void:
+	var extent := minf(garage_preview.size.x, garage_preview.size.y) * 0.86
+	var center := garage_preview.size * 0.5
+	var offsets := _garage_mount_offsets()
+	for i in range(garage_slot_buttons.size()):
+		var slot := garage_slot_buttons[i]
+		slot.visible = true
+		if i == 3:
+			slot.visible = slot.visible and active_body == "gt"
+			slot.size = Vector2(0.11, 0.17) * extent
+			slot.position = center + Vector2(0.115, 0.245) * extent - slot.size * 0.5
+			slot.tooltip_text = "Правая ракетная площадка"
+			continue
+		if i == 2:
+			slot.visible = slot.visible and van_owned
+			slot.size = Vector2.ONE * extent * 0.10
+			slot.position = center + offsets[2] * extent - slot.size * 0.5
+			slot.tooltip_text = GARAGE_TURRETS[garage_aux_installed].name if garage_aux_installed >= 0 else "Вторая турель · свободно"
+			continue
+		slot.size = Vector2(extent * 0.25, extent * (0.16 if i == 0 else 0.21))
+		if i == 1 and active_body == "gt":
+			slot.size.x = extent * 0.11
+		slot.position = center + offsets[i] * extent - slot.size * 0.5
+		var installed := garage_turret_installed if i == 0 else garage_installed
+		var catalog: Array = GARAGE_TURRETS if i == 0 else GARAGE_KITS
+		var slot_name := "Крепление турели" if i == 0 else "Крепление на грузовой платформе"
+		slot.tooltip_text = "%s\nСвободно" % slot_name
+		if installed >= 0:
+			var kit: Dictionary = catalog[installed]
+			slot.tooltip_text = "%s\nУрон: %s · Дальность: %d\nПерезарядка: %d ход." % [kit.name, _garage_damage(kit), int(kit.range), int(kit.rate)]
+	if garage_module_views.size() == 4:
+		_layout_garage_modules(center, extent)
+
+func _garage_mount_offsets() -> PackedVector2Array:
+	match active_body:
+		"gt":
+			return PackedVector2Array([Vector2(0, -0.307), Vector2(-0.115, 0.245), Vector2(0, 0.248)])
+		"minibus":
+			return PackedVector2Array([Vector2(0, -0.151), Vector2(0, 0.057), Vector2(0, 0.248)])
+		"van":
+			return PackedVector2Array([Vector2(0, -0.077), Vector2(0, 0.222), Vector2(0, 0.043)])
+	return PackedVector2Array([Vector2.ZERO, Vector2(0, 0.21), Vector2.ZERO])
+
+func _refresh_garage() -> void:
+	if garage_stats == null:
+		return
+	garage_title.text = ("%s  /  " % districts[current_district].name if at_location else "") + "Панель каравана"
+	garage_resources.text = "%s C  |  Корпус %d%%  |  Вода %d  |  Заряд %d  |  Груз %d/%d" % [_credits_display(), hull, water_tank, battery, _cargo_used(), capacity]
+	var exit_button: Button = right_tabs.get_meta("exit_button")
+	exit_button.visible = at_location
+	var catalog := _garage_catalog()
+	var installed := _garage_current_module()
+	garage_slot_heading.text = "Слот турели" if garage_turret_slot else "Слот ракетной кассеты"
+	if garage_aux_selected:
+		garage_slot_heading.text = "Вторая турель"
+	if garage_extra_selected:
+		garage_slot_heading.text = "Правая ракетная площадка"
+	for i in range(garage_options.size()):
+		var option := garage_options[i]
+		option.visible = i < catalog.size()
+		if option.visible:
+			var entry: Dictionary = catalog[i]
+			var labels: Array = garage_option_labels[i]
+			labels[0].text = "⊕" if garage_turret_slot else "↑".repeat(int(entry.get("count", 1)))
+			labels[1].text = entry.name
+			labels[2].text = "%d кг" % entry.mass
+			labels[3].text = "%d C" % entry.price
+			option.tooltip_text = entry.name
+			option.set_pressed_no_signal(i == garage_selected)
+	var old: Dictionary = catalog[installed] if installed >= 0 else {}
+	var kit: Dictionary = catalog[garage_selected]
+	var old_space: int = old.get("space", 0)
+	var free: int = capacity - _cargo_used()
+	var after: int = free + old_space - int(kit.space)
+	var base_mass := int(BODY_CATALOG[active_body][3])
+	if garage_turret_installed >= 0 and (not garage_turret_slot or garage_aux_selected):
+		base_mass += int(GARAGE_TURRETS[garage_turret_installed].mass)
+	if garage_aux_installed >= 0 and van_owned and not garage_aux_selected:
+		base_mass += int(GARAGE_TURRETS[garage_aux_installed].mass)
+	if garage_installed >= 0 and (garage_turret_slot or garage_extra_selected):
+		base_mass += int(GARAGE_KITS[garage_installed].mass)
+	if garage_extra_installed and active_body == "gt" and not garage_extra_selected:
+		base_mass += int(GARAGE_KITS[0].mass)
+	var values := ["%d кг" % (base_mass + int(old.get("mass", 0))), "%d кг" % (base_mass + int(kit.mass)), str(free), str(after), str(int(old.range)) if not old.is_empty() else "—", str(int(kit.range)), "%d ход." % old.rate if not old.is_empty() else "—", "%d ход." % kit.rate, _garage_damage(old), _garage_damage(kit)]
+	for i in range(values.size()):
+		garage_stat_values[4 + floori(float(i) * 0.5) * 3 + i % 2].text = values[i]
+	garage_install.text = "Установлено" if garage_selected == installed else "Установить · %d C" % kit.price
+	garage_install.disabled = not at_location or garage_selected == installed or not _can_afford(int(kit.price)) or after < 0
+	garage_remove.text = "Снять турель" if garage_turret_slot else "Снять кассету"
+	garage_remove.disabled = not at_location or installed < 0
+	garage_repair.disabled = not at_location or not _can_afford(int(40)) or hull >= 100
+	_refresh_showroom()
+	garage_preview.queue_redraw()
+	_layout_garage_slots()
+
+func _garage_damage(kit: Dictionary) -> String:
+	if kit.is_empty():
+		return "—"
+	var count: int = kit.get("count", 1)
+	return "%d–%d" % [int(kit.get("min_damage", 10)) * count, int(kit.get("max_damage", 16)) * count]
+
+func _fit_garage_kit(index: int) -> void:
+	var installed := _garage_current_module()
+	var catalog := _garage_catalog()
+	if not at_location or index == installed:
+		return
+	var old_space: int = catalog[installed].space if installed >= 0 else 0
+	var kit: Dictionary = catalog[index] if index >= 0 else {}
+	var price: int = kit.get("price", 0)
+	var new_capacity: int = capacity + old_space - int(kit.get("space", 0))
+	if not _can_afford(int(price)) or _cargo_used() > new_capacity:
+		return
+	_spend_credits(price)
+	capacity = new_capacity
+	if garage_aux_selected:
+		garage_aux_installed = index
+		map_panel.call("configure_aux_laser", kit)
+		_refresh()
+		return
+	if garage_extra_selected:
+		garage_extra_installed = index >= 0
+		map_panel.call("configure_extra_rockets", garage_extra_installed)
+		_refresh()
+		return
+	if garage_turret_slot:
+		garage_turret_installed = index
+		map_panel.call("configure_player_turret", kit)
+		_refresh()
+		return
+	garage_installed = index
+	map_panel.set("player_missile_range", kit.get("range", 0.0))
+	map_panel.set("player_missile_rate", kit.get("rate", 2.0))
+	map_panel.set("player_missile_count", kit.get("count", 0))
+	map_panel.set("player_mortar_equipped", kit.get("mortar", false))
+	map_panel.set("player_missile_damage_min", kit.get("min_damage", 10))
+	map_panel.set("player_missile_damage_max", kit.get("max_damage", 16))
+	map_panel.call("_update_rocket_module")
+	if index < 0:
+		map_panel.get("weapon_orders").erase(1)
+		if map_panel.get("selected_weapon_index") == 1:
+			map_panel.set("selected_weapon_index", -1)
+	_refresh()
+
+func _draw_garage_preview() -> void:
+	var viewport_size := garage_preview.size
+	var center := viewport_size * 0.5
+	var extent := minf(viewport_size.x, viewport_size.y) * 0.86
+	if extent <= 0.0:
+		return
+	var body: Texture2D = map_panel.call("player_body_diffuse")
+	if body != null:
+		garage_preview.draw_texture_rect(body, Rect2(center - Vector2.ONE * extent * 0.5, Vector2.ONE * extent), false)
+	if garage_slot_buttons.size() == 4:
+		_draw_garage_mounts(extent)
+
+func _draw_garage_mounts(extent: float) -> void:
+	var turret_center := garage_slot_buttons[0].get_rect().get_center()
+	var rack_center := garage_slot_buttons[1].get_rect().get_center()
+	var turret_alpha := 0.95 if garage_hovered_slot == 0 else (0.62 if garage_turret_installed < 0 else 0.32)
+	var rack_alpha := 0.95 if garage_hovered_slot == 1 else (0.62 if garage_installed < 0 else 0.32)
+	var mint := Color("#83e6d0")
+	if active_body == "gt":
+		var extra := garage_slot_buttons[3].get_rect()
+		for side in [-1.0, 1.0]:
+			var x: float = extra.get_center().x + side * extent * 0.035
+			garage_preview.draw_line(Vector2(x, extra.position.y + 4), Vector2(x, extra.end.y - 4), Color(mint, 0.9 if garage_hovered_slot == 3 else 0.55), 1.6, true)
+	garage_preview.draw_arc(turret_center, extent * 0.046, 0.0, TAU, 40, Color(mint, turret_alpha), 1.6, true)
+	if van_owned:
+		var auxiliary := garage_slot_buttons[2].get_rect().get_center()
+		garage_preview.draw_arc(auxiliary, extent * 0.046, 0.0, TAU, 40, Color(mint, 0.95 if garage_hovered_slot == 2 else 0.62), 1.6, true)
+	for side in [-1.0, 1.0]:
+		var x: float = rack_center.x + side * extent * (0.076 if van_owned else 0.11)
+		for end in [-1.0, 1.0]:
+			var y: float = rack_center.y + end * extent * 0.081
+			garage_preview.draw_line(Vector2(x, y), Vector2(x, y - end * extent * 0.041), Color(mint, rack_alpha), 2.2, true)
+
+func _layout_garage_modules(center: Vector2, extent: float) -> void:
+	var offsets := _garage_mount_offsets()
+	var turret_index := garage_selected if garage_turret_slot and not garage_aux_selected else garage_turret_installed
+	var turret: Texture2D
+	if turret_index >= 0:
+		var key := "cannon_texture" if turret_index == 2 else ("pulse_texture" if turret_index == 3 else "turret_texture")
+		if bool(GARAGE_TURRETS[turret_index].get("rail", false)):
+			key = "rail_texture"
+		elif bool(GARAGE_TURRETS[turret_index].get("shotgun", false)):
+			key = "shotgun_texture"
+		turret = map_panel.get(key)
+	var rail := turret_index == 4
+	var turret_size := Vector2.ONE * extent * (0.22 if turret_index == 2 else (0.19 if rail else 0.15))
+	_set_garage_module(0, turret, Rect2(center + offsets[0] * extent - turret_size * Vector2(0.5, 0.66 if rail else 0.5), turret_size), turret_index != garage_turret_installed)
+	var rack_index := garage_installed if garage_turret_slot or garage_extra_selected else garage_selected
+	var kit: Dictionary = GARAGE_KITS[rack_index] if rack_index >= 0 else {}
+	var rockets: Texture2D = map_panel.get("rocket_module_texture") if not kit.is_empty() else null
+	if kit.get("mortar", false):
+		rockets = map_panel.get("mortar_texture")
+	var rack_size := Vector2(extent * (0.24 + 0.05 * int(kit.get("count", 0))), extent * 0.34)
+	if active_body == "gt":
+		rack_size.x *= 0.62
+	_set_garage_module(1, rockets, Rect2(center + offsets[1] * extent - rack_size * 0.5, rack_size), rack_index != garage_installed)
+	var auxiliary_index := garage_selected if garage_aux_selected else garage_aux_installed
+	var auxiliary: Texture2D = map_panel.call("turret_module_texture", GARAGE_TURRETS[auxiliary_index]) if van_owned and auxiliary_index >= 0 else null
+	var aux_size := Vector2.ONE * extent * 0.13
+	var aux_pivot := Vector2(0.5, 0.66) if auxiliary_index == 4 else Vector2(0.5, 0.5)
+	_set_garage_module(2, auxiliary, Rect2(center + offsets[2] * extent - aux_size * aux_pivot, aux_size), auxiliary_index != garage_aux_installed)
+	var extra: Texture2D = map_panel.get("rocket_module_texture") if active_body == "gt" and (garage_extra_installed or garage_extra_selected) else null
+	var extra_size := Vector2(0.18, 0.29) * extent
+	_set_garage_module(3, extra, Rect2(center + Vector2(0.115, 0.245) * extent - extra_size * 0.5, extra_size), not garage_extra_installed)
+
+func _set_garage_module(index: int, texture: Texture2D, rect: Rect2, preview: bool) -> void:
+	var view := garage_module_views[index]
+	view.texture = texture
+	view.visible = texture != null
+	view.position = rect.position
+	view.size = rect.size
+	var material := view.material as ShaderMaterial
+	var selected_slot := 3 if garage_extra_selected else (2 if garage_aux_selected else (0 if garage_turret_slot else 1))
+	material.set_shader_parameter("selected", garage_hovered_slot == index or selected_slot == index)
+	material.set_shader_parameter("preview", preview)
 
 func _close_modal() -> void:
 	if modal_panel == null:
@@ -384,7 +1096,19 @@ func _close_modal() -> void:
 	if at_location and current_district >= 0 and current_district < districts.size():
 		var center: Vector2 = districts[current_district].pos
 		var exit_direction: Vector2 = _random_city_exit_direction()
-		var exit_start: Vector2 = center + exit_direction * max(12.0, CITY_ENTRY_RADIUS - CITY_EXIT_START_OFFSET)
+		var exit_radius := maxf(12.0, CITY_ENTRY_RADIUS - CITY_EXIT_START_OFFSET)
+		var exit_start := Vector2.INF
+		for i in range(8):
+			var direction := exit_direction.rotated(i * TAU / 8.0)
+			var candidate := center + direction * exit_radius
+			if map_panel.call("vehicle_position_is_free", candidate):
+				exit_direction = direction
+				exit_start = candidate
+				break
+		if not exit_start.is_finite():
+			modal_panel.show()
+			_log("Выезд заблокирован машинами.")
+			return
 		var exit_target: Vector2 = center + exit_direction * (CITY_ENTRY_RADIUS + CITY_EXIT_DRIVE_DISTANCE)
 		player_pos = exit_start
 		vehicle_angle = exit_direction.angle()
@@ -666,9 +1390,14 @@ func _build_mission_tab() -> void:
 	box.add_child(accepted_list)
 
 func _refresh() -> void:
+	_refresh_garage()
 	selected_district = current_district if selected_district == -1 else selected_district
-	var movement = " -> %s" % travel_destination_name if is_traveling else ""
-	status_label.text = "Д%d | %dC | корпус %d%% | вода %d | заряд %d | груз %d/%d | ИИ %d%% | эко %d%%%s" % [day, credits, hull, water_tank, battery, _cargo_used(), capacity, ai_complex, eco_unrest, movement]
+	var readings := ["ДЕНЬ %02d" % day, "КРЕДИТЫ %s" % _credits_display(), "КОРПУС %d%%" % hull, "ВОДА %d" % water_tank, "ЗАРЯД %d" % battery, "ГРУЗ %d/%d" % [_cargo_used(), capacity]]
+	for i in range(status_values.size()):
+		status_values[i].text = readings[i]
+		status_values[i].tooltip_text = "ИИ %d%% · Эко %d%%" % [ai_complex, eco_unrest]
+		if is_traveling:
+			status_values[i].tooltip_text += "\nВ пути: %s" % travel_destination_name
 	if is_traveling:
 		location_label.text = "В пути: %s" % travel_destination_name
 	elif not at_location:
@@ -719,7 +1448,7 @@ func _update_market() -> void:
 		buy.text = "+1"
 		buy.custom_minimum_size = Vector2(48, 34)
 		buy.add_theme_font_size_override("font_size", 14)
-		buy.disabled = credits < prices[good] or _cargo_used() + GOODS[good].mass > capacity
+		buy.disabled = not _can_afford(int(prices[good])) or _cargo_used() + GOODS[good].mass > capacity
 		buy.pressed.connect(func(g: String = good): _buy(g))
 		row.add_child(buy)
 		var sell := Button.new()
@@ -772,7 +1501,7 @@ func _update_missions() -> void:
 		var box := _mission_card(m)
 		var button := Button.new()
 		button.text = "Взять"
-		button.disabled = _cargo_used() + GOODS[m.good].mass * m.amount > capacity
+		button.disabled = _cargo_used() + GOODS[m.good].mass * m.amount > capacity or (m.get("ambush", false) and current_district != m.from)
 		button.pressed.connect(func(index := i): _accept_mission(index))
 		box.add_child(button)
 		mission_list.add_child(box)
@@ -791,6 +1520,8 @@ func _mission_card(m: Dictionary) -> VBoxContainer:
 	box.add_theme_constant_override("separation", 4)
 	var title := Label.new()
 	title.text = "%s -> %s  |  %d x %s" % [districts[m.from].name, districts[m.to].name, m.amount, GOODS[m.good].title]
+	if m.has("name"):
+		title.text = "%s  |  %s" % [m.name, title.text]
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title.autowrap_mode = TextServer.AUTOWRAP_OFF
 	title.clip_text = true
@@ -806,6 +1537,12 @@ func _mission_card(m: Dictionary) -> VBoxContainer:
 	meta.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	meta.add_theme_font_size_override("font_size", 13)
 	box.add_child(meta)
+	if m.get("ambush", false):
+		var warning := Label.new()
+		warning.text = "На трассе замечены пираты. Забрать груз в Новом Колодце."
+		warning.add_theme_color_override("font_color", Color("#e3bd82"))
+		warning.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(warning)
 	return box
 
 func _prices_for(index: int) -> Dictionary:
@@ -847,8 +1584,8 @@ func _buy(good: String) -> void:
 	if is_traveling or not at_location:
 		return
 	var price = _prices_for(current_district)[good]
-	if credits >= price and _cargo_used() + GOODS[good].mass <= capacity:
-		credits -= price
+	if _can_afford(price) and _cargo_used() + GOODS[good].mass <= capacity:
+		_spend_credits(price)
 		cargo[good] += 1
 		_log("Куплено: %s за %dC." % [GOODS[good].title, price])
 		_refresh()
@@ -872,11 +1609,15 @@ func _accept_mission(index: int) -> void:
 	if index < 0 or index >= missions.size():
 		return
 	var m = missions[index]
+	if m.get("ambush", false) and current_district != m.from:
+		return
 	var needed_space = GOODS[m.good].mass * m.amount
 	if _cargo_used() + needed_space > capacity:
 		return
 	cargo[m.good] += m.amount
 	accepted_missions.append(m)
+	if m.get("ambush", false):
+		trial_ambush_pending = true
 	missions.remove_at(index)
 	_log("Контракт принят: %s в %s." % [GOODS[m.good].title, districts[m.to].name])
 	_refresh()
@@ -945,6 +1686,8 @@ func _retarget_after_current_step(target_pos: Vector2, target_district: int, des
 	_refresh()
 
 func _assign_travel_order(target_pos: Vector2, target_district: int, destination_name: String, cost: Dictionary, enter_after_arrival: bool, suppress_arrival_event: bool) -> void:
+	vehicle_blocked_time = 0.0
+	route_blocked_pos = Vector2.INF
 	travel_from = current_district
 	travel_to = target_district
 	travel_target_district = target_district
@@ -1221,14 +1964,26 @@ func _update_deadlines() -> void:
 		if m.deadline < 0:
 			failed.append(m)
 	for m in failed:
+		if m.get("ambush", false):
+			trial_ambush_pending = false
 		accepted_missions.erase(m)
 		credits = max(0, credits - int(m.reward * 0.35))
 		eco_unrest = clampi(eco_unrest + 4, 0, 100)
 		_log("Срыв контракта ударил по репутации: %s ждала груз." % districts[m.to].name)
 
+func _can_afford(amount: int) -> bool:
+	return DEBUG_UNLIMITED_CREDITS or credits >= amount
+
+func _spend_credits(amount: int) -> void:
+	if not DEBUG_UNLIMITED_CREDITS:
+		credits -= amount
+
+func _credits_display() -> String:
+	return "∞" if DEBUG_UNLIMITED_CREDITS else str(credits)
+
 func _repair() -> void:
-	if credits >= 40 and hull < 100:
-		credits -= 40
+	if _can_afford(40) and hull < 100:
+		_spend_credits(40)
 		hull = min(100, hull + 22)
 		_log("Механики подтянули подвеску и бронекапот. Корпус %d%%." % hull)
 		_refresh()
@@ -1298,7 +2053,7 @@ func _enter_location(index: int) -> void:
 	selected_district = index
 	current_district = index
 	at_location = true
-	_open_modal(0)
+	_open_modal(GARAGE_TAB)
 	_refresh()
 
 func _map_point_clicked(world_pos: Vector2) -> void:
@@ -1313,6 +2068,7 @@ func _queue_combat_pause_at_next_waypoint() -> void:
 		return
 	if advance_one_turn:
 		return
+	combat_mode = true
 	advance_one_turn = true
 	_log("Попадание: караван дотянет до ближайшей точки и остановится.")
 	_refresh()
@@ -1330,8 +2086,7 @@ func _pause_travel_turn(enter_combat := false) -> void:
 	var remaining_enter_after_arrival := open_location_after_travel
 	var remaining_suppress_arrival := travel_suppress_arrival_event
 	is_traveling = false
-	if enter_combat:
-		combat_mode = true
+	combat_mode = combat_mode or enter_combat or advance_one_turn
 	advance_one_turn = false
 	_assign_travel_order(remaining_target_pos, remaining_target_district, remaining_destination_name, remaining_cost, remaining_enter_after_arrival, remaining_suppress_arrival)
 	travel_start_pos = player_pos
@@ -1345,15 +2100,30 @@ func _pause_travel_turn(enter_combat := false) -> void:
 			map_panel.call("_advance_weapon_turn_cooldowns")
 		map_panel.queue_redraw()
 
+func can_play_turn() -> bool:
+	return hold_turn_time <= 0.0 and not is_traveling and not at_location and hull > 0 and travel_destination_name != "" and travel_target_pos.is_finite()
+
+func can_hold_turn() -> bool:
+	return hold_turn_time <= 0.0 and combat_mode and not is_traveling and not at_location and hull > 0
+
+func _hold_combat_turn() -> void:
+	if not can_hold_turn():
+		return
+	hold_turn_time = 1.65
+	map_panel.call("_queue_player_turn_weapons")
+	map_panel.call("_queue_enemy_turn_weapons")
+	map_panel.call("_complete_combat_turn")
+	_log("Ход: караван держит позицию.")
+
 func _play_combat_turn() -> void:
-	if is_traveling or travel_destination_name == "" or not travel_target_pos.is_finite():
+	if not can_play_turn():
 		return
 	if map_panel != null and map_panel.has_method("_queue_player_turn_weapons"):
 		map_panel.call("_queue_player_turn_weapons")
 	if map_panel != null and map_panel.has_method("_queue_enemy_turn_weapons"):
 		map_panel.call("_queue_enemy_turn_weapons")
 	is_traveling = true
-	combat_mode = false
+	combat_mode = true
 	advance_one_turn = true
 	at_location = false
 	_log("Ход: караван двигается к следующей точке маршрута.")

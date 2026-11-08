@@ -2,10 +2,42 @@ extends Control
 
 var neon_font: Font
 var sign_hover_levels := {}
+var sign_layouts := {}
 var map
+var body_outline: Sprite2D
+var outline_material: ShaderMaterial
+var world_outlines := {}
+var checkpoint_digits := {}
 
 func bind(map_ref) -> void:
 	map = map_ref
+	body_outline = Sprite2D.new()
+	var outline_shader := Shader.new()
+	outline_shader.code = """
+shader_type canvas_item;
+render_mode unshaded;
+varying vec4 outline_tint;
+void vertex() {
+	outline_tint = COLOR;
+}
+void fragment() {
+	vec2 step_uv = TEXTURE_PIXEL_SIZE * 9.0;
+	float body = texture(TEXTURE, UV).a;
+	float around = max(
+		max(texture(TEXTURE, UV + vec2(step_uv.x, 0.0)).a,
+			texture(TEXTURE, UV - vec2(step_uv.x, 0.0)).a),
+		max(texture(TEXTURE, UV + vec2(0.0, step_uv.y)).a,
+			texture(TEXTURE, UV - vec2(0.0, step_uv.y)).a)
+	);
+	COLOR = vec4(outline_tint.rgb, max(around - body, 0.0) * outline_tint.a);
+}
+"""
+	outline_material = ShaderMaterial.new()
+	outline_material.shader = outline_shader
+	body_outline.material = outline_material
+	body_outline.self_modulate = Color(0.43, 0.95, 0.83, 0.42)
+	body_outline.z_index = -1
+	add_child(body_outline)
 	var font_file := FontFile.new()
 	if font_file.load_dynamic_font("res://assets/fonts/Jura.ttf") == OK:
 		neon_font = font_file
@@ -13,18 +45,65 @@ func bind(map_ref) -> void:
 	set_process(true)
 
 func _process(_delta: float) -> void:
+	var body: Sprite2D = map.car_sprite if map != null else null
+	body_outline.visible = is_instance_valid(body) and body.is_visible_in_tree()
+	if body_outline.visible:
+		body_outline.texture = map.player_body_diffuse()
+		body_outline.transform = get_global_transform().affine_inverse() * body.get_global_transform()
 	if map != null and map.game != null:
+		_sync_world_outlines()
 		for i in range(map.game.districts.size()):
 			var current: float = sign_hover_levels.get(i, 0.0)
 			var target := 1.0 if map.hovered_district == i else 0.0
 			sign_hover_levels[i] = lerp(current, target, 0.14)
 	queue_redraw()
 
+func _sync_world_outlines() -> void:
+	var seen := {}
+	var inverse := get_global_transform().affine_inverse()
+	var enemy_color := Color("#ff7869", 0.46)
+	if map.pirate_active:
+		var tint := Color(enemy_color, 0.88) if not map.primary_pirate_targeted_by.is_empty() else enemy_color
+		_sync_outline(map.pirate_car_sprite, tint, inverse, seen)
+	for enemy in map.debug_pirates:
+		var root: Node2D = enemy.get("root")
+		if is_instance_valid(root) and root.get_child_count() > 0:
+			var marks: Array = enemy.get("targeted_by", [])
+			_sync_outline(root.get_child(0) as Sprite2D, Color(enemy_color, 0.88) if not marks.is_empty() else enemy_color, inverse, seen)
+	for entry in map.district_nodes:
+		var index: int = entry.index
+		var tint: Color = map._location_neon_color(map.game.districts[index].faction)
+		tint.a = 0.36 if index == map.hovered_district else 0.20
+		_sync_outline(entry.sprite, tint, inverse, seen)
+	for id in world_outlines.keys():
+		if not seen.has(id):
+			world_outlines[id].queue_free()
+			world_outlines.erase(id)
+
+func _sync_outline(source: Sprite2D, tint: Color, inverse: Transform2D, seen: Dictionary) -> void:
+	if not is_instance_valid(source) or not source.is_visible_in_tree() or source.texture == null:
+		return
+	var id := source.get_instance_id()
+	seen[id] = true
+	var outline: Sprite2D = world_outlines.get(id)
+	if outline == null:
+		outline = Sprite2D.new()
+		outline.material = outline_material
+		outline.z_index = -2
+		outline.texture = source.texture
+		outline.centered = source.centered
+		outline.offset = source.offset
+		add_child(outline)
+		world_outlines[id] = outline
+	outline.transform = inverse * source.get_global_transform()
+	outline.self_modulate = tint
+
 func _draw() -> void:
 	if map == null or map.game == null:
 		return
 	_draw_rain()
 	_draw_route_overlay()
+	_draw_blocked_route()
 	_draw_destination_overlay()
 	_draw_weapon_range_overlay()
 	_draw_location_name_labels()
@@ -68,6 +147,7 @@ func _draw_rain() -> void:
 
 func _draw_route_overlay() -> void:
 	if map.current_route_points.size() < 2:
+		checkpoint_digits.clear()
 		return
 	var left_track: Array[Vector2] = []
 	var right_track: Array[Vector2] = []
@@ -115,6 +195,8 @@ func _draw_route_overlay_track(points: Array[Vector2]) -> void:
 				var p2: Vector2 = a + direction * (cursor + step)
 				var progress: float = clamp((traveled_len + cursor + step * 0.5) / max(1.0, total_len), 0.0, 1.0)
 				var alpha_scale: float = lerp(0.30, 1.0, progress)
+				if map.game.combat_mode:
+					alpha_scale = 1.0 if i < map.route_first_leg_end else 0.26
 				draw_line(p1, p2, Color("#45ff87", 0.18 * alpha_scale), 4.5, true)
 				draw_line(p1, p2, Color("#baffcb", 0.62 * alpha_scale), 1.45, true)
 			cursor += step
@@ -124,14 +206,48 @@ func _draw_route_overlay_track(points: Array[Vector2]) -> void:
 				remaining = dash if draw_dash else gap
 		traveled_len += segment_len
 
+func _draw_blocked_route() -> void:
+	var world_pos: Vector2 = map.game.route_blocked_pos
+	if not world_pos.is_finite():
+		return
+	var point: Vector2 = map._to_screen(world_pos) + Vector2(0, 32)
+	var marker := Rect2(point + Vector2(-60, -12), Vector2(120, 24))
+	draw_rect(marker, Color("#18100c", 0.93))
+	draw_rect(marker, Color("#ffad6d", 0.70), false, 1.0)
+	draw_string(get_theme_default_font(), marker.position + Vector2(0, 16), "Путь перекрыт", HORIZONTAL_ALIGNMENT_CENTER, marker.size.x, 12, Color("#ffd2aa"))
+
 func _draw_turn_markers_overlay() -> void:
 	var markers: Array[Vector2] = map._planned_turn_marker_points()
-	if markers.is_empty():
-		return
-	for world_pos in markers:
-		var screen_pos: Vector2 = map._to_screen(world_pos)
-		draw_circle(screen_pos, 9.5, Color("#ff7a1a", 0.14))
-		draw_circle(screen_pos, 4.2, Color("#ffb13d", 0.92))
+	var next_digits := {}
+	var now := Time.get_ticks_msec() * 0.001
+	for i in range(markers.size()):
+		var point: Vector2 = markers[i]
+		var digit: Dictionary = checkpoint_digits.get(point, {"number": i + 1, "previous": 0, "since": now})
+		if digit.number != i + 1:
+			digit.previous = digit.number
+			digit.number = i + 1
+			digit.since = now
+		next_digits[point] = digit
+		var screen_pos: Vector2 = map._to_screen(point)
+		if not Rect2(Vector2.ZERO, size).grow(32.0).has_point(screen_pos):
+			continue
+		var age: float = now - digit.since
+		var brightness := 1.0 if i == 0 else 0.40
+		if digit.previous > 0 and age < 0.15:
+			_draw_nixie_number(screen_pos, digit.previous, brightness * (1.0 - smoothstep(0.0, 0.15, age)))
+		_draw_nixie_number(screen_pos, i + 1, brightness * smoothstep(0.025, 0.22, age))
+	checkpoint_digits = next_digits
+
+func _draw_nixie_number(center: Vector2, number: int, brightness: float) -> void:
+	var font: Font = neon_font if neon_font != null else get_theme_default_font()
+	var digits := str(number)
+	var font_size := 20
+	var width := font.get_string_size(digits, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size).x
+	var baseline := (font.get_ascent(font_size) - font.get_descent(font_size)) * 0.5
+	var origin := center + Vector2(-width * 0.5, baseline)
+	draw_string_outline(font, origin, digits, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, 4, Color("#ff520c", brightness * 0.16))
+	draw_string_outline(font, origin, digits, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, 2, Color("#ff791a", brightness * 0.56))
+	draw_string(font, origin, digits, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, Color("#ffbf72", brightness))
 
 func _route_length(points: Array[Vector2]) -> float:
 	var total := 0.0
@@ -160,10 +276,20 @@ func _draw_destination_overlay() -> void:
 	if not Rect2(Vector2(-40.0, -40.0), size + Vector2(80.0, 80.0)).has_point(screen_pos):
 		return
 	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.007)
-	draw_circle(screen_pos, lerp(9.0, 15.0, pulse), Color("#dfffd8", 0.12))
-	draw_arc(screen_pos, lerp(15.0, 22.0, pulse), 0.0, TAU, 42, Color("#eaffdf", 0.72), 1.7, true)
-	draw_line(screen_pos + Vector2(-10.0, 0.0), screen_pos + Vector2(10.0, 0.0), Color("#eaffdf", 0.75), 1.2, true)
-	draw_line(screen_pos + Vector2(0.0, -10.0), screen_pos + Vector2(0.0, 10.0), Color("#eaffdf", 0.75), 1.2, true)
+	var hovered := get_local_mouse_position().distance_squared_to(screen_pos) <= 24.0 * 24.0
+	var mint := Color("#bcffdf") if hovered else Color("#76dfb6")
+	var radius := 9.0 + pulse * 1.5
+	for direction in [Vector2(-1, -1), Vector2(1, -1), Vector2(1, 1), Vector2(-1, 1)]:
+		var corner: Vector2 = screen_pos + direction * radius
+		var points := PackedVector2Array([
+			corner - Vector2(direction.x * 5.0, 0.0),
+			corner,
+			corner - Vector2(0.0, direction.y * 5.0),
+		])
+		draw_polyline(points, Color(mint, 0.15), 4.0, true)
+		draw_polyline(points, Color(mint, 1.0 if hovered else 0.82), 1.5, true)
+	if hovered:
+		draw_string(get_theme_default_font(), screen_pos + Vector2(20.0, -12.0), "Цель маршрута", HORIZONTAL_ALIGNMENT_LEFT, -1.0, 12, mint)
 
 func _screen_headlight_factor(screen_pos: Vector2) -> float:
 	if map == null or map.game == null:
@@ -203,8 +329,19 @@ func _draw_hover_card() -> void:
 	draw_string(get_theme_default_font(), card_pos + Vector2(18, 96), "Безопасность %d  Вычисления %d" % [d.security, d.compute], HORIZONTAL_ALIGNMENT_LEFT, 250, 12, Color("#d9e2e7"))
 
 func _draw_weapon_hud() -> void:
-	_draw_weapon_slot(0, "Лазер", map.player_laser_color, map.player_weapon_cooldown, map.player_weapon_rate, map.player_fire_phase > 0.0)
-	_draw_weapon_slot(1, "Ракеты", Color("#ffcf5a"), map.player_missile_cooldown, map.player_missile_rate, false)
+	if is_instance_valid(map.aux_laser):
+		_draw_weapon_slot(2, str(map.aux_turret_kit.get("name", "")), map._weapon_color(2), map.aux_laser_cooldown, float(map.aux_turret_kit.get("rate", 1.0)), false)
+	if is_instance_valid(map.extra_rockets):
+		_draw_weapon_slot(3, "Правая ракетная кассета", map._weapon_color(3), map.extra_rocket_cooldown, map.EXTRA_ROCKET_RATE, false)
+	if map.player_turret_equipped:
+		var weapon_name := "Импульсный излучатель" if map.player_pulse_equipped else ("Автопушка" if map.player_cannon_equipped else "Лазер")
+		if map.player_rail_equipped:
+			weapon_name = "Рельсовая пушка"
+		elif map.player_shotgun_equipped:
+			weapon_name = "Дробовая турель"
+		_draw_weapon_slot(0, weapon_name, map.player_laser_color, map.player_weapon_cooldown, map.player_weapon_rate, map.player_fire_phase > 0.0)
+	if map.player_missile_count > 0:
+		_draw_weapon_slot(1, "Миномёт" if map.player_mortar_equipped else "Ракеты", Color("#ffcf5a"), map.player_missile_cooldown, map.player_missile_rate, false)
 
 func _draw_weapon_slot(index: int, label: String, weapon_color: Color, cooldown: float, rate: float, firing: bool) -> void:
 	var slot_center := _weapon_slot_center(index)
@@ -234,7 +371,7 @@ func _draw_weapon_slot(index: int, label: String, weapon_color: Color, cooldown:
 	draw_arc(slot_center, radius + 1.0, start_angle, end_angle, 48, Color(ring_color.r, ring_color.g, ring_color.b, ring_alpha), 2.5, true)
 	if firing:
 		draw_arc(slot_center, radius + 5.0, start_angle, start_angle + TAU * pulse, 48, Color(ring_color.r, ring_color.g, ring_color.b, 0.24), 2.0, true)
-	if index == 0:
+	if index != 1 and index != 3:
 		draw_line(slot_center + Vector2(-6.0, 4.0), slot_center + Vector2(6.0, -4.0), Color("#f3ffff", 0.82), 1.5, true)
 		draw_line(slot_center + Vector2(-2.0, -8.0), slot_center + Vector2(2.0, 8.0), Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.75), 1.1, true)
 	else:
@@ -255,8 +392,8 @@ func _draw_weapon_range_overlay() -> void:
 	if hovered_index == -1:
 		return
 	var center: Vector2 = map._to_screen(map.game.player_pos)
-	var weapon_color: Color = map.player_laser_color if hovered_index == 0 else Color("#ffcf5a")
-	var range_radius: float = map.player_weapon_range if hovered_index == 0 else map.player_missile_range
+	var weapon_color: Color = Color("#88ffdd") if hovered_index == 2 else (map.player_laser_color if hovered_index == 0 else Color("#ffcf5a"))
+	var range_radius: float = map.AUX_LASER_RANGE if hovered_index == 2 else (map.player_weapon_range if hovered_index == 0 else map.player_missile_range)
 	draw_circle(center, range_radius, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.026))
 	draw_circle(center, range_radius * 0.74, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.020))
 	draw_circle(center, range_radius * 0.46, Color(weapon_color.r, weapon_color.g, weapon_color.b, 0.016))
@@ -362,21 +499,29 @@ func _draw_location_name_labels() -> void:
 			continue
 		var has_sprite: bool = map.location_textures.has(d.name)
 		var label_center: Vector2 = screen_pos + Vector2(0.0, -122.0 if has_sprite else -52.0)
-		var neon_color: Color = _location_neon_color(d.faction)
+		var neon_color: Color = map._location_neon_color(d.faction)
+		if not has_sprite:
+			draw_arc(screen_pos, 22.0, 0.0, TAU, 40, Color(neon_color, 0.38), 1.2, true)
 		_draw_neon_sign(d.name, label_center, neon_color, i, sign_hover_levels.get(i, 0.0))
 
 func _draw_neon_sign(text: String, center: Vector2, color: Color, seed: int, hover_amount: float) -> void:
 	var font: Font = neon_font if neon_font != null else get_theme_default_font()
-	var font_size := 23
-	var total_size: Vector2 = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
-	var cursor := center + Vector2(-total_size.x * 0.5, 0.0)
+	var font_size := 25
+	if not sign_layouts.has(text):
+		var offsets := PackedFloat32Array()
+		var width := 0.0
+		for i in range(text.length()):
+			offsets.append(width)
+			width += font.get_char_size(text.unicode_at(i), font_size).x + 0.8
+		sign_layouts[text] = {"offsets": offsets, "width": width}
+	var layout: Dictionary = sign_layouts[text]
+	var offsets: PackedFloat32Array = layout.offsets
+	var origin := center + Vector2(-float(layout.width) * 0.5, 0.0)
 	var time: float = Time.get_ticks_msec() * 0.001
-	var tube_color := color.lightened(0.55 + hover_amount * 0.25)
+	var tube_color := color.lightened(0.18 + hover_amount * 0.23)
 	for i in range(text.length()):
 		var ch := text.substr(i, 1)
-		var ch_size: Vector2 = font.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size)
 		if ch == " ":
-			cursor.x += max(ch_size.x, 8.0)
 			continue
 		var phase: float = float(seed * 37 + i * 19)
 		var shimmer: float = 0.90 + 0.10 * sin(time * (3.2 + float(i % 3) * 0.7) + phase)
@@ -389,17 +534,10 @@ func _draw_neon_sign(text: String, center: Vector2, color: Color, seed: int, hov
 			var fault_mix: float = 0.36 + 0.26 * sin(time * 5.7 + phase)
 			var fault_color: Color = _fault_neon_color(color, seed + i)
 			letter_color = tube_color.lerp(fault_color, fault_mix)
-		var char_pos := cursor
-		var glow_alpha: float = min(0.88, (0.34 + hover_amount * 0.28) * intensity)
-		for offset in [Vector2(-4.0, 0.0), Vector2(4.0, 0.0), Vector2(0.0, -4.0), Vector2(0.0, 4.0)]:
-			draw_string(font, char_pos + offset, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 6.0, font_size, Color(letter_color.r, letter_color.g, letter_color.b, glow_alpha * 0.30))
-		for offset in [Vector2(-2.2, 0.0), Vector2(2.2, 0.0), Vector2(0.0, -2.2), Vector2(0.0, 2.2)]:
-			draw_string(font, char_pos + offset, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 4.0, font_size, Color(letter_color.r, letter_color.g, letter_color.b, glow_alpha))
-		for offset in [Vector2(-1.0, 0.0), Vector2(1.0, 0.0), Vector2(0.0, -1.0), Vector2(0.0, 1.0)]:
-			draw_string(font, char_pos + offset, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 3.0, font_size, Color(letter_color.r, letter_color.g, letter_color.b, min(1.0, 0.70 * intensity)))
-		draw_string(font, char_pos + Vector2(1.0, 1.0), ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 3.0, font_size, Color("#011012", 0.80))
-		draw_string(font, char_pos, ch, HORIZONTAL_ALIGNMENT_LEFT, ch_size.x + 3.0, font_size, Color("#ffffff", min(1.0, 0.78 + 0.26 * intensity)).lerp(letter_color.lightened(0.55), 0.42))
-		cursor.x += ch_size.x + 1.0
+		var char_pos := origin + Vector2(offsets[i], 0.0)
+		draw_string_outline(font, char_pos, ch, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, 5, Color(letter_color, 0.11 * intensity))
+		draw_string_outline(font, char_pos, ch, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, 2, Color(letter_color, 0.56 * intensity))
+		draw_string(font, char_pos, ch, HORIZONTAL_ALIGNMENT_LEFT, -1.0, font_size, Color(letter_color.lightened(0.52), minf(1.0, intensity)))
 
 func _location_neon_color(faction_key: String) -> Color:
 	match faction_key:
@@ -439,17 +577,11 @@ func _weapon_slot_center(index: int) -> Vector2:
 	return Vector2(58.0 + float(index) * 58.0, max(88.0, size.y - 74.0))
 
 func _hovered_weapon_index() -> int:
-	var mouse_pos := get_local_mouse_position()
-	for i in range(2):
-		var center := _weapon_slot_center(i)
-		var rect := Rect2(center - Vector2(30.0, 30.0), Vector2(60.0, 60.0))
-		if rect.has_point(mouse_pos):
-			return i
-	return -1
+	return map._weapon_index_at(get_local_mouse_position())
 
 func _weapon_hud_rect() -> Rect2:
 	var center := _weapon_slot_center(0)
-	return Rect2(center - Vector2(48.0, 44.0), Vector2(224.0, 88.0))
+	return Rect2(center - Vector2(48.0, 44.0), Vector2(282.0 if is_instance_valid(map.extra_rockets) else 224.0, 88.0))
 
 func _draw_dashed_circle(center: Vector2, radius: float, color: Color) -> void:
 	var segments := 192
@@ -472,7 +604,8 @@ func _draw_minimap() -> void:
 	var pos := Vector2(size.x - map_size.x - 18, 18)
 	map.minimap_rect = Rect2(pos, map_size)
 	map.pirate_debug_button_rect = Rect2(pos + Vector2(0.0, map_size.y + 8.0), Vector2(38.0, 34.0))
-	map.play_turn_button_rect = Rect2(pos + Vector2(46.0, map_size.y + 8.0), Vector2(72.0, 34.0))
+	map.play_turn_button_rect = Rect2(pos + Vector2(46.0, map_size.y + 8.0), Vector2(159.0, 34.0))
+	map.hold_turn_button_rect = Rect2(pos + Vector2(46.0, map_size.y + 48.0), Vector2(159.0, 34.0)) if map.game.combat_mode else Rect2()
 	draw_rect(Rect2(pos, map_size), Color("#0d1215", 0.88), true)
 	draw_rect(Rect2(pos, map_size), Color("#e7ecef", 0.25), false, 1.0)
 	var scale = min(map_size.x / map.WORLD_SIZE.x, map_size.y / map.WORLD_SIZE.y)
@@ -504,6 +637,8 @@ func _draw_minimap() -> void:
 	draw_string(get_theme_default_font(), pos + Vector2(10, map_size.y - 10), "Перейти к точке", HORIZONTAL_ALIGNMENT_LEFT, 180, 11, Color("#cfd8dc"))
 	_draw_pirate_debug_button(map.pirate_debug_button_rect)
 	_draw_play_turn_button(map.play_turn_button_rect)
+	if map.game.combat_mode:
+		_draw_turn_action(map.hold_turn_button_rect, "Остаться на месте", map.game.can_hold_turn())
 
 func _draw_pirate_debug_button(button_rect: Rect2) -> void:
 	var hovered: bool = button_rect.has_point(get_local_mouse_position())
@@ -524,18 +659,21 @@ func _draw_pirate_debug_button(button_rect: Rect2) -> void:
 		draw_string(get_theme_default_font(), tooltip_pos + Vector2(9.0, 18.0), "Добавить пирата", HORIZONTAL_ALIGNMENT_LEFT, 96.0, 11, Color("#ffe8e5"))
 
 func _draw_play_turn_button(button_rect: Rect2) -> void:
+	var label := "Выберите маршрут"
+	if map.game.hold_turn_time > 0.0 or (map.game.is_traveling and map.game.combat_mode):
+		label = "Ход выполняется"
+	elif map.game.is_traveling:
+		label = "Караван в пути"
+	elif map.game.can_play_turn():
+		label = "Выполнить ход"
+	_draw_turn_action(button_rect, label, map.game.can_play_turn())
+
+func _draw_turn_action(button_rect: Rect2, label: String, enabled: bool) -> void:
 	var hovered: bool = button_rect.has_point(get_local_mouse_position())
 	var accent := Color("#45ff87")
-	var enabled: bool = map.game.travel_destination_name != "" and not map.game.is_traveling
 	var alpha: float = 0.92 if hovered and enabled else (0.72 if enabled else 0.34)
 	draw_rect(button_rect.grow(6.0), Color(accent.r, accent.g, accent.b, 0.16 if hovered and enabled else 0.06), true)
 	draw_rect(button_rect, Color("#0d1215", alpha), true)
 	draw_rect(button_rect, Color(accent.r, accent.g, accent.b, 0.58 if enabled else 0.22), false, 1.2)
 	var text_color := Color("#d7ffe4", 0.96 if enabled else 0.44)
-	draw_string(get_theme_default_font(), button_rect.position + Vector2(15.0, 22.0), "PLAY", HORIZONTAL_ALIGNMENT_LEFT, 54.0, 12, text_color)
-	if hovered:
-		var tooltip_pos := button_rect.position + Vector2(82.0, 4.0)
-		var tooltip_size := Vector2(104.0, 26.0)
-		draw_rect(Rect2(tooltip_pos, tooltip_size), Color("#071013", 0.88), true)
-		draw_rect(Rect2(tooltip_pos, tooltip_size), Color(accent.r, accent.g, accent.b, 0.36), false, 1.0)
-		draw_string(get_theme_default_font(), tooltip_pos + Vector2(9.0, 18.0), "Следующий ход", HORIZONTAL_ALIGNMENT_LEFT, 90.0, 11, Color("#eafff4", 0.92))
+	draw_string(get_theme_default_font(), button_rect.position + Vector2(0.0, 22.0), label, HORIZONTAL_ALIGNMENT_CENTER, button_rect.size.x, 12, text_color)

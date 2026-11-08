@@ -3,6 +3,7 @@ extends Panel
 const WORLD_SIZE := Vector2(5200, 3500)
 const NODE_HIT_RADIUS := 42.0
 const VEHICLE_TEXTURE_SCALE := 0.052
+const VEHICLE_CLEARANCE := 78.0
 const MAP_BACKGROUND := Color("#111c1f")
 const CLOUD_POOL_SIZE := 104
 const RAIN_STREAK_COUNT := 180
@@ -10,6 +11,50 @@ const RAIN_IMPACT_RATE := 240.0
 const WHEEL_SPRAY_RATE := 34.0
 
 var car_texture: Texture2D
+var pickup_texture: Texture2D
+var van_texture: Texture2D
+var gt_texture: Texture2D
+var minibus_texture: Texture2D
+var active_body_model := "pickup"
+var body_surfaces := {}
+var player_van_equipped := false
+const EXTRA_ROCKET_RANGE := 500.0
+const EXTRA_ROCKET_RATE := 2.0
+var aux_laser: Sprite2D
+var aux_laser_cooldown := 0.0
+var aux_turret_kit: Dictionary = {}
+var extra_rockets: Sprite2D
+var extra_rocket_cooldown := 0.0
+var turret_texture: Texture2D
+var cannon_texture: Texture2D
+var rail_texture: Texture2D
+var shotgun_texture: Texture2D
+var shotgun_surface: Texture2D
+var player_shotgun_equipped := false
+var rail_surface: Texture2D
+var mortar_texture: Texture2D
+var player_rail_equipped := false
+var player_mortar_equipped := false
+var pulse_texture: Texture2D
+var pulse_surface: Texture2D
+var player_pulse_equipped := false
+var rocket_module_texture: Texture2D
+var cannon_surface: Texture2D
+var laser_surface: Texture2D
+var player_rocket_module: Sprite2D
+var player_cannon_equipped := false
+const CANNON_ROUNDS := 9
+const CANNON_INTERVAL := 0.067
+var cannon_burst_stream: AudioStreamWAV
+var cannon_rounds_ejected := 0
+var engine_audio: AudioStreamPlayer
+var engine_loop: AudioStreamWAV
+var weapon_sounds := {}
+const MORTAR_WHISTLE_DURATION := 0.46
+var cannon_flash: Polygon2D
+var player_turret: Sprite2D
+var soft_weapon_material: ShaderMaterial
+var explosion_shader: Shader
 var light_front_texture: Texture2D
 var light_back_texture: Texture2D
 var pirate_car_texture: Texture2D
@@ -45,8 +90,6 @@ var pirate_front_left_light: PointLight2D
 var pirate_front_right_light: PointLight2D
 var pirate_rear_left_light: PointLight2D
 var pirate_rear_right_light: PointLight2D
-var enemy_headlight_root: Node2D
-var enemy_headlight_cones: Array[Polygon2D] = []
 var pirate_laser_root: Node2D
 var pirate_laser_outer_glow: Line2D
 var pirate_laser_glow: Line2D
@@ -124,6 +167,8 @@ var hover_screen_pos := Vector2.ZERO
 var minimap_rect := Rect2()
 var pirate_debug_button_rect := Rect2()
 var play_turn_button_rect := Rect2()
+var hold_turn_button_rect := Rect2()
+var route_first_leg_end := 0
 var fullscreen_view := false
 var centered_initially := false
 var minimap_dragging := false
@@ -178,8 +223,10 @@ var player_weapon_rate := 1.0
 var player_weapon_damage_min := 5
 var player_weapon_damage_max := 9
 var player_weapon_range := 360.0
+var player_turret_equipped := true
 var player_missile_cooldown := 0.0
 var player_missile_rate := 2.0
+var player_missile_count := 2
 var player_missile_range := 500.0
 var player_missile_damage_min := 10
 var player_missile_damage_max := 16
@@ -255,8 +302,10 @@ func _input(event: InputEvent) -> void:
 			_spawn_debug_pirate()
 			get_viewport().set_input_as_handled()
 			return
-		if not fullscreen_view and play_turn_button_rect.has_point(local_mouse):
-			if game.has_method("_play_combat_turn"):
+		if not fullscreen_view and (play_turn_button_rect.has_point(local_mouse) or hold_turn_button_rect.has_point(local_mouse)):
+			if hold_turn_button_rect.has_point(local_mouse):
+				game.call("_hold_combat_turn")
+			elif game.has_method("_play_combat_turn"):
 				game.call("_play_combat_turn")
 			get_viewport().set_input_as_handled()
 			return
@@ -280,6 +329,17 @@ func _load_vehicle_textures() -> void:
 	if car_texture != null and pirate_car_texture != null:
 		return
 	car_texture = _load_png_texture("res://assets/vehicles/car-top.png")
+	pickup_texture = _load_png_texture("res://assets/vehicles/player-pickup.png")
+	van_texture = _load_png_texture("res://assets/vehicles/player-van.png")
+	gt_texture = _load_png_texture("res://assets/vehicles/player-gt.png")
+	minibus_texture = _load_png_texture("res://assets/vehicles/player-minibus.png")
+	turret_texture = _load_png_texture("res://assets/vehicles/laser-module.png")
+	cannon_texture = _load_png_texture("res://assets/vehicles/cannon-module.png")
+	rail_texture = _load_png_texture("res://assets/vehicles/rail-module.png")
+	shotgun_texture = _load_png_texture("res://assets/vehicles/shotgun-module.png")
+	mortar_texture = _load_png_texture("res://assets/vehicles/mortar-module.png")
+	pulse_texture = _load_png_texture("res://assets/vehicles/pulse-module.png")
+	rocket_module_texture = _load_png_texture("res://assets/vehicles/rocket-module.png")
 	light_front_texture = _load_png_texture("res://assets/vehicles/light-front.png")
 	light_back_texture = _load_png_texture("res://assets/vehicles/light-back.png")
 	pirate_car_texture = _load_png_texture("res://assets/vehicles/pirates/pirate1/car-top.png")
@@ -375,6 +435,13 @@ func _setup_world_nodes() -> void:
 	world_root.z_as_relative = true
 	add_child(world_root)
 
+	var ground := Polygon2D.new()
+	ground.polygon = _make_rect_polygon(Vector2(-512.0, -512.0), WORLD_SIZE + Vector2(1024.0, 1024.0))
+	var ground_material := ShaderMaterial.new()
+	ground_material.shader = preload("res://assets/ground.gdshader")
+	ground.material = ground_material
+	world_root.add_child(ground)
+
 	heat_root = Node2D.new()
 	heat_root.z_index = 0
 	world_root.add_child(heat_root)
@@ -418,7 +485,7 @@ func _setup_canvas_modulate() -> void:
 	if canvas_modulate != null:
 		return
 	canvas_modulate = CanvasModulate.new()
-	canvas_modulate.color = Color("#566164")
+	canvas_modulate.color = Color("#646c70")
 	add_child(canvas_modulate)
 
 func _setup_debug_traffic() -> void:
@@ -451,6 +518,7 @@ func _make_simple_vehicle(texture: Texture2D, tint: Color, scale_mul := 0.92, fr
 		front_overlay.light_mask = 1
 		front_overlay.modulate = Color(1.0, 1.0, 1.0, 0.94)
 		root.add_child(front_overlay)
+	if front_light_texture != null:
 		var front_left := _make_front_light()
 		var front_right := _make_front_light()
 		front_left.position = Vector2(-7.0, -31.0) * scale_mul
@@ -476,6 +544,78 @@ func _make_simple_vehicle(texture: Texture2D, tint: Color, scale_mul := 0.92, fr
 	npc_root.add_child(root)
 	return root
 
+func _vehicle_obstacles(excluded: Node2D, include_player: bool) -> PackedVector2Array:
+	var obstacles := PackedVector2Array()
+	if include_player and not game.at_location and game.hull > 0:
+		obstacles.append(game.player_pos)
+	if pirate_active and pirate_root != excluded:
+		obstacles.append(pirate_pos)
+	for cars in [friendly_cars, debug_pirates]:
+		for car in cars:
+			if car["root"] != excluded:
+				obstacles.append(car["pos"])
+	return obstacles
+
+func _clear_vehicle_step(origin: Vector2, destination: Vector2, obstacles: PackedVector2Array) -> Vector2:
+	var motion := destination - origin
+	var distance := motion.length()
+	if distance <= 0.001:
+		return origin
+	var direction := motion / distance
+	var allowed := distance
+	for center in obstacles:
+		var offset := center - origin
+		var ahead := offset.dot(direction)
+		if ahead <= 0.0:
+			continue
+		var lateral := offset.cross(direction)
+		var chord_squared := VEHICLE_CLEARANCE * VEHICLE_CLEARANCE - lateral * lateral
+		if chord_squared > 0.0:
+			allowed = minf(allowed, maxf(0.0, ahead - sqrt(chord_squared) - 0.1))
+	return origin + direction * allowed
+
+func limit_player_motion(origin: Vector2, destination: Vector2) -> Vector2:
+	return _clear_vehicle_step(origin, destination, _vehicle_obstacles(null, false))
+
+func vehicle_position_is_free(point: Vector2) -> bool:
+	for center in _vehicle_obstacles(null, false):
+		if point.distance_squared_to(center) < VEHICLE_CLEARANCE * VEHICLE_CLEARANCE:
+			return false
+	return true
+
+func _vehicle_spawn_position(preferred: Vector2, include_player: bool) -> Vector2:
+	var obstacles := _vehicle_obstacles(null, include_player)
+	for ring in range(5):
+		for i in range(1 if ring == 0 else 8):
+			var offset := Vector2.RIGHT.rotated(i * TAU / 8.0) * VEHICLE_CLEARANCE * ring
+			var point := (preferred + offset).clamp(Vector2.ZERO, WORLD_SIZE)
+			var free := true
+			for center in obstacles:
+				if point.distance_squared_to(center) < VEHICLE_CLEARANCE * VEHICLE_CLEARANCE:
+					free = false
+					break
+			if free:
+				return point
+	return Vector2.INF
+
+func _drive_npc(origin: Vector2, target: Vector2, angle: float, speed: float, turn_rate: float, delta: float, root: Node2D) -> Vector3:
+	var obstacles := _vehicle_obstacles(root, true)
+	var desired := origin.angle_to_point(target)
+	var probe := origin + Vector2.RIGHT.rotated(desired) * VEHICLE_CLEARANCE
+	if _clear_vehicle_step(origin, probe, obstacles).distance_squared_to(probe) > 1.0:
+		var left := origin + Vector2.RIGHT.rotated(desired - 1.2) * VEHICLE_CLEARANCE
+		var right := origin + Vector2.RIGHT.rotated(desired + 1.2) * VEHICLE_CLEARANCE
+		var left_clear := origin.distance_squared_to(_clear_vehicle_step(origin, left, obstacles))
+		var right_clear := origin.distance_squared_to(_clear_vehicle_step(origin, right, obstacles))
+		if absf(left_clear - right_clear) < 1.0:
+			desired += -1.2 if wrapf(angle - desired, -PI, PI) < 0.0 else 1.2
+		else:
+			desired += -1.2 if left_clear > right_clear else 1.2
+	angle += clampf(wrapf(desired - angle, -PI, PI), -turn_rate * delta, turn_rate * delta)
+	var next := (origin + Vector2.RIGHT.rotated(angle) * speed * delta).clamp(Vector2.ZERO, WORLD_SIZE)
+	next = _clear_vehicle_step(origin, next, obstacles)
+	return Vector3(next.x, next.y, angle)
+
 func _spawn_friendly_car(index: int) -> void:
 	if game.districts.is_empty():
 		return
@@ -484,7 +624,10 @@ func _spawn_friendly_car(index: int) -> void:
 	if to_index == from_index:
 		to_index = (to_index + 1) % game.districts.size()
 	var from_pos: Vector2 = game.districts[from_index].pos + Vector2.RIGHT.rotated(road_bump_rng.randf_range(0.0, TAU)) * road_bump_rng.randf_range(120.0, 230.0)
-	var root := _make_simple_vehicle(car_texture, Color("#b8c8bd").lerp(Color("#9fb7ff"), road_bump_rng.randf_range(0.0, 0.55)), 0.78)
+	from_pos = _vehicle_spawn_position(from_pos, true)
+	if not from_pos.is_finite():
+		return
+	var root := _make_simple_vehicle(car_texture, Color("#b8c8bd").lerp(Color("#9fb7ff"), road_bump_rng.randf_range(0.0, 0.55)), 0.78, light_front_texture, light_back_texture)
 	friendly_cars.append({
 		"id": index,
 		"root": root,
@@ -524,13 +667,9 @@ func _update_friendly_cars(delta: float) -> void:
 			car = _choose_friendly_destination(car)
 			friendly_cars[i] = car
 			continue
-		var desired_angle: float = to_target.angle()
-		var angle: float = float(car["angle"])
-		var angle_delta: float = wrapf(desired_angle - angle, -PI, PI)
-		angle += clamp(angle_delta, -1.35 * delta, 1.35 * delta)
-		pos += Vector2.RIGHT.rotated(angle) * float(car["speed"]) * delta
-		car["pos"] = pos
-		car["angle"] = angle
+		var drive := _drive_npc(pos, target, float(car["angle"]), float(car["speed"]), 1.35, delta, car["root"])
+		car["pos"] = Vector2(drive.x, drive.y)
+		car["angle"] = drive.z
 		friendly_cars[i] = car
 	_update_friendly_car_nodes()
 
@@ -538,7 +677,7 @@ func _update_friendly_car_nodes() -> void:
 	for car in friendly_cars:
 		var root: Node2D = car["root"] as Node2D
 		if is_instance_valid(root):
-			root.position = _to_screen(car["pos"])
+			root.position = car["pos"]
 			root.rotation = float(car["angle"]) + PI * 0.5
 
 func _setup_overlay() -> void:
@@ -586,6 +725,10 @@ func _rebuild_world_nodes() -> void:
 		heat_nodes.append(heat)
 
 	var drawn := {}
+	var scenery_rng := RandomNumberGenerator.new()
+	scenery_rng.seed = 59021
+	var puddles := _load_png_textures_from_dir("res://assets/puddles")
+	_add_new_well_approach()
 	for from in game.routes.keys():
 		for to in game.routes[from]:
 			var key = "%d-%d" % [min(from, to), max(from, to)]
@@ -594,11 +737,17 @@ func _rebuild_world_nodes() -> void:
 			drawn[key] = true
 			var line := Line2D.new()
 			line.points = PackedVector2Array([game.districts[from].pos, game.districts[to].pos])
-			line.width = 7.5
-			line.default_color = Color("#d8e4e5", 0.12)
+			line.width = 84.0
+			line.texture_mode = Line2D.LINE_TEXTURE_STRETCH
+			var road_material := ShaderMaterial.new()
+			road_material.shader = preload("res://assets/road.gdshader")
+			road_material.set_shader_parameter("road_origin", line.points[0])
+			road_material.set_shader_parameter("road_forward", line.points[0].direction_to(line.points[1]))
+			line.material = road_material
 			line.antialiased = true
 			routes_root.add_child(line)
 			route_lines[key] = {"line": line, "from": from, "to": to}
+			_add_roadside_details(line.points[0], line.points[1], puddles, scenery_rng)
 
 	for i in range(game.districts.size()):
 		var node := Node2D.new()
@@ -655,13 +804,64 @@ func _rebuild_world_nodes() -> void:
 
 		name_glow = PointLight2D.new()
 		name_glow.texture = _make_radial_light_texture(Color.WHITE)
-		name_glow.color = _location_neon_color(game.districts[i].faction).lightened(0.25)
+		name_glow.color = _location_neon_color(game.districts[i].faction)
 		name_glow.energy = 1.35
 		name_glow.texture_scale = 2.85
-		name_glow.position = Vector2(0.0, -98.0 if sprite != null else -38.0)
+		name_glow.position = Vector2(0.0, -132.0 if sprite != null else -62.0)
 		node.add_child(name_glow)
 
 		district_nodes.append({"root": node, "marker": marker, "ring": ring, "sprite": sprite, "light_sprite": light_sprite, "location_glow": location_glow, "name_glow": name_glow, "index": i})
+
+func _add_new_well_approach() -> void:
+	var well_index := -1
+	var dome_index := -1
+	for i in range(game.districts.size()):
+		match game.districts[i].name:
+			"Новый Колодец":
+				well_index = i
+			"Агрокупол N-12":
+				dome_index = i
+	if well_index < 0 or dome_index < 0:
+		return
+	var well: Vector2 = game.districts[well_index].pos
+	var dome: Vector2 = game.districts[dome_index].pos
+	var approach := Polygon2D.new()
+	approach.position = well
+	approach.rotation = (dome - well).angle()
+	approach.z_index = -1
+	approach.polygon = _make_rect_polygon(Vector2(230.0, -460.0), Vector2(490.0, 460.0))
+	var material := ShaderMaterial.new()
+	material.shader = preload("res://assets/new-well-approach.gdshader")
+	approach.material = material
+	routes_root.add_child(approach)
+
+func _add_roadside_details(start: Vector2, end: Vector2, puddles: Array, rng: RandomNumberGenerator) -> void:
+	var length := start.distance_to(end)
+	var forward := start.direction_to(end)
+	var side := forward.orthogonal()
+	for along in range(180, int(length) - 170, 116):
+		var point := start + forward * (float(along) + rng.randf_range(-28.0, 28.0))
+		var flank := side if rng.randf() < 0.5 else -side
+		if not puddles.is_empty() and rng.randf() < 0.58:
+			var puddle := Sprite2D.new()
+			puddle.texture = puddles[rng.randi_range(0, puddles.size() - 1)]
+			var width := rng.randf_range(30.0, 68.0)
+			puddle.scale = Vector2.ONE * (width / puddle.texture.get_width())
+			puddle.position = point + flank * rng.randf_range(17.0, 49.0)
+			puddle.modulate = Color(0.61, 0.68, 0.72, 0.80)
+			puddle.z_index = 1
+			routes_root.add_child(puddle)
+		if rng.randf() < 0.74:
+			var bush := ColorRect.new()
+			bush.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			bush.size = Vector2.ONE * rng.randf_range(24.0, 49.0)
+			bush.position = point + flank * rng.randf_range(55.0, 94.0) - bush.size * 0.5
+			bush.z_index = 1
+			var material := ShaderMaterial.new()
+			material.shader = preload("res://assets/bush.gdshader")
+			material.set_shader_parameter("seed", rng.randf_range(0.0, TAU))
+			bush.material = material
+			routes_root.add_child(bush)
 
 func _make_circle_polygon(radius: float, segments: int) -> PackedVector2Array:
 	var points := PackedVector2Array()
@@ -726,15 +926,36 @@ func _setup_vehicle_node() -> void:
 	wheel_right_pivot.add_child(wheel_right_sprite)
 
 	car_sprite = Sprite2D.new()
-	car_sprite.texture = car_texture
+	car_sprite.texture = _make_vehicle_normal_texture(pickup_texture if pickup_texture != null else car_texture)
 	car_sprite.scale = Vector2(VEHICLE_TEXTURE_SCALE, VEHICLE_TEXTURE_SCALE)
 	car_sprite.z_index = 1
 	car_sprite.z_as_relative = true
 	car_sprite.light_mask = 1
 	vehicle_root.add_child(car_sprite)
+	if turret_texture != null:
+		player_turret = Sprite2D.new()
+		laser_surface = _make_vehicle_normal_texture(turret_texture, true)
+		cannon_surface = _make_vehicle_normal_texture(cannon_texture, true)
+		rail_surface = _make_vehicle_normal_texture(rail_texture, true)
+		shotgun_surface = _make_vehicle_normal_texture(shotgun_texture, true)
+		pulse_surface = _make_vehicle_normal_texture(pulse_texture, true)
+		player_turret.texture = laser_surface
+		player_turret.scale = Vector2.ONE * (9.5 / turret_texture.get_width())
+		player_turret.z_index = 4
+		vehicle_root.add_child(player_turret)
+	if rocket_module_texture != null:
+		player_rocket_module = Sprite2D.new()
+		player_rocket_module.texture = rocket_module_texture
+		player_rocket_module.position = Vector2(0.0, 15.0)
+		player_rocket_module.z_index = 4
+		vehicle_root.add_child(player_rocket_module)
+		_update_rocket_module()
+	if pickup_texture != null:
+		wheel_left_sprite.hide()
+		wheel_right_sprite.hide()
 
 	car_shadow_sprite = Sprite2D.new()
-	car_shadow_sprite.texture = car_texture
+	car_shadow_sprite.texture = pickup_texture if pickup_texture != null else car_texture
 	car_shadow_sprite.scale = Vector2(VEHICLE_TEXTURE_SCALE, VEHICLE_TEXTURE_SCALE)
 	car_shadow_sprite.z_index = 2
 	car_shadow_sprite.z_as_relative = true
@@ -820,6 +1041,8 @@ func _setup_pirate_node() -> void:
 	laser_inner_material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
 	pirate_laser_inner_glow.material = laser_inner_material
 	pirate_laser_root.add_child(pirate_laser_inner_glow)
+	for beam in [pirate_laser_outer_glow, pirate_laser_glow, pirate_laser_inner_glow]:
+		_soften_weapon_line(beam)
 
 	pirate_laser_trace_line = Line2D.new()
 	pirate_laser_trace_line.width = 1.1
@@ -865,6 +1088,8 @@ func _setup_pirate_node() -> void:
 	player_laser_glow = _make_laser_line(18.0, Color("#36f5ff", 0.24))
 	player_laser_root.add_child(player_laser_glow)
 	player_laser_inner_glow = _make_laser_line(8.0, Color("#75fbff", 0.34))
+	for beam in [player_laser_outer_glow, player_laser_glow, player_laser_inner_glow]:
+		_soften_weapon_line(beam)
 	player_laser_root.add_child(player_laser_inner_glow)
 	player_laser_trace_line = _make_laser_line(1.1, Color("#e8ffff", 0.0))
 	player_laser_root.add_child(player_laser_trace_line)
@@ -906,10 +1131,6 @@ func _setup_pirate_node() -> void:
 		add_child(range_light)
 		weapon_range_lights.append(range_light)
 
-	enemy_headlight_root = Node2D.new()
-	enemy_headlight_root.z_index = 8
-	enemy_headlight_root.z_as_relative = false
-	add_child(enemy_headlight_root)
 
 	pirate_root = Node2D.new()
 	pirate_root.z_index = 11
@@ -963,6 +1184,22 @@ func _setup_pirate_node() -> void:
 	pirate_rear_right_light.color = Color("#ff3030")
 	pirate_rear_right_light.texture_scale = 0.18
 	pirate_root.add_child(pirate_rear_right_light)
+
+func _soften_weapon_line(line: Line2D) -> void:
+	if soft_weapon_material == null:
+		var shader := Shader.new()
+		shader.code = """
+shader_type canvas_item;
+render_mode unshaded, blend_add;
+void fragment() {
+	float edge = 1.0 - smoothstep(0.0, 1.0, abs(UV.y * 2.0 - 1.0));
+	COLOR.a *= edge * edge;
+}
+"""
+		soft_weapon_material = ShaderMaterial.new()
+		soft_weapon_material.shader = shader
+	line.texture_mode = Line2D.LINE_TEXTURE_STRETCH
+	line.material = soft_weapon_material
 
 func _make_laser_line(width: float, color: Color) -> Line2D:
 	var line := Line2D.new()
@@ -1126,10 +1363,89 @@ func _setup_health_bar_node() -> void:
 func _make_front_light() -> PointLight2D:
 	var light := PointLight2D.new()
 	light.texture = front_light_texture
-	light.color = Color("#ffd88a")
+	light.color = Color("#ffcb91")
 	light.energy = 0.0
 	light.texture_scale = 0.94
 	return light
+
+func player_body_diffuse() -> Texture2D:
+	match active_body_model:
+		"van": return van_texture
+		"gt": return gt_texture
+		"minibus": return minibus_texture
+	return pickup_texture if pickup_texture != null else car_texture
+
+func equip_player_van() -> bool:
+	return equip_player_body("van")
+
+func equip_player_body(model: String) -> bool:
+	var previous := active_body_model
+	active_body_model = model
+	var diffuse := player_body_diffuse()
+	if diffuse == null or not is_instance_valid(car_sprite):
+		active_body_model = previous
+		return false
+	player_van_equipped = model != "pickup"
+	if not body_surfaces.has(model):
+		body_surfaces[model] = _make_vehicle_normal_texture(diffuse)
+	car_sprite.texture = body_surfaces[model]
+	car_sprite.scale = Vector2.ONE * (0.056 if player_van_equipped else VEHICLE_TEXTURE_SCALE)
+	car_shadow_sprite.texture = diffuse
+	car_shadow_sprite.scale = car_sprite.scale
+	wheel_left_sprite.hide()
+	wheel_right_sprite.hide()
+	if is_instance_valid(player_rocket_module):
+		player_rocket_module.position = Vector2(-8.0, 17.0) if model == "gt" else (Vector2(0.0, 4.0) if model == "minibus" else Vector2(0.0, 15.5 if player_van_equipped else 15.0))
+		_update_rocket_module()
+	return true
+
+func _turret_mount_position() -> Vector2:
+	if active_body_model == "gt":
+		return Vector2(0.0, -21.4)
+	if active_body_model == "minibus":
+		return Vector2(0.0, -10.6)
+	return Vector2(0.0, -5.4) if player_van_equipped else Vector2.ZERO
+
+func _make_vehicle_normal_texture(diffuse: Texture2D, turret := false) -> Texture2D:
+	if diffuse == null:
+		return null
+	var resolution := 256
+	var normals := Image.create_empty(resolution, resolution, false, Image.FORMAT_RGB8)
+	var step := 1.0 / float(resolution)
+	for y in range(resolution):
+		for x in range(resolution):
+			var uv := (Vector2(x, y) + Vector2(0.5, 0.5)) * step
+			var dx := (_vehicle_surface_height(uv + Vector2(step, 0.0), turret) - _vehicle_surface_height(uv - Vector2(step, 0.0), turret)) / (2.0 * step)
+			var dy := (_vehicle_surface_height(uv + Vector2(0.0, step), turret) - _vehicle_surface_height(uv - Vector2(0.0, step), turret)) / (2.0 * step)
+			var normal := Vector3(-dx, dy, 1.0).normalized()
+			normals.set_pixel(x, y, Color(normal.x * 0.5 + 0.5, normal.y * 0.5 + 0.5, normal.z * 0.5 + 0.5))
+	var body := CanvasTexture.new()
+	body.diffuse_texture = diffuse
+	body.normal_texture = ImageTexture.create_from_image(normals)
+	return body
+
+func _vehicle_surface_height(uv: Vector2, turret: bool) -> float:
+	var side := absf(uv.x - 0.497)
+	if turret:
+		var radius := uv.distance_to(Vector2(0.50, 0.50))
+		var base := 1.0 - smoothstep(0.25, 0.30, radius)
+		var barrel := (1.0 - smoothstep(0.025, 0.105, side)) * smoothstep(0.14, 0.19, uv.y) * (1.0 - smoothstep(0.65, 0.71, uv.y))
+		return base * 0.025 + barrel * 0.055
+	if player_van_equipped:
+		var shell := (1.0 - smoothstep(0.125, 0.172, side)) * smoothstep(0.02, 0.11, uv.y) * (1.0 - smoothstep(0.92, 0.985, uv.y))
+		var roof := (1.0 - smoothstep(0.107, 0.147, side)) * smoothstep(0.23, 0.34, uv.y) * (1.0 - smoothstep(0.84, 0.95, uv.y))
+		return shell * 0.046 + roof * 0.064
+	if pickup_texture != null:
+		var body := (1.0 - smoothstep(0.122, 0.169, side)) * smoothstep(0.028, 0.10, uv.y) * (1.0 - smoothstep(0.87, 0.93, uv.y))
+		var cabin := (1.0 - smoothstep(0.095, 0.135, side)) * smoothstep(0.23, 0.34, uv.y) * (1.0 - smoothstep(0.426, 0.475, uv.y))
+		var bed := (1.0 - smoothstep(0.120, 0.145, side)) * smoothstep(0.53, 0.57, uv.y) * (1.0 - smoothstep(0.85, 0.885, uv.y))
+		return body * 0.045 + cabin * 0.074 - bed * 0.030
+	var shoulders := 1.0 - smoothstep(0.09, 0.187, side)
+	var cabin := smoothstep(0.265, 0.435, uv.y) * (1.0 - smoothstep(0.585, 0.775, uv.y))
+	var roof := 1.0 - smoothstep(0.073, 0.145, side)
+	var hood := smoothstep(0.08, 0.24, uv.y) * (1.0 - smoothstep(0.24, 0.31, uv.y))
+	var body_span := smoothstep(0.08, 0.18, uv.y) * (1.0 - smoothstep(0.79, 0.89, uv.y))
+	return shoulders * body_span * 0.046 + cabin * roof * 0.083 + hood * shoulders * 0.019
 
 func _make_car_shadow_material() -> ShaderMaterial:
 	var shader := Shader.new()
@@ -1185,13 +1501,17 @@ func _make_cone_light_texture() -> Texture2D:
 			var wide_spread: float = abs(offset.y) / max(1.0, offset.x * 0.78)
 			var core: float = pow(max(0.0, 1.0 - distance / 430.0), 2.0) * pow(max(0.0, 1.0 - narrow_spread), 1.6)
 			var haze: float = pow(max(0.0, 1.0 - distance / 560.0), 2.8) * pow(max(0.0, 1.0 - wide_spread), 2.4)
-			var alpha: float = min(0.70, core * 0.72 + haze * 0.26)
+			var end_fade := 1.0 - smoothstep(155.0, 318.0, offset.x)
+			var side_fade := 1.0 - smoothstep(70.0, 125.0, absf(offset.y))
+			var alpha: float = min(0.70, core * 0.72 + haze * 0.26) * end_fade * side_fade
 			image.set_pixel(x, y, Color(1, 1, 1, alpha))
 	return ImageTexture.create_from_image(image)
 
 func _process(delta: float) -> void:
 	if game == null:
 		return
+	_update_engine_audio(delta)
+	_update_traffic_engines(delta)
 	_sync_overlay_bounds()
 	if not centered_initially and size.x > 0.0 and size.y > 0.0:
 		centered_initially = true
@@ -1201,12 +1521,10 @@ func _process(delta: float) -> void:
 	_update_vehicle_lights()
 	if not _is_active_map_view():
 		_despawn_pirate()
-		_ensure_enemy_headlight_cones(0)
 		_update_damage_popups(delta)
 		return
 	_update_pirate(delta)
 	_update_debug_pirates(delta)
-	_update_enemy_headlight_cones()
 	_update_auto_combat_trigger()
 	_update_damage_popups(delta)
 	_update_impact_sparks(delta)
@@ -1270,7 +1588,7 @@ func _gui_input(event: InputEvent) -> void:
 			hovered_district = -1
 			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 			queue_redraw()
-		elif not fullscreen_view and play_turn_button_rect.has_point(event.position):
+		elif not fullscreen_view and (play_turn_button_rect.has_point(event.position) or hold_turn_button_rect.has_point(event.position)):
 			hovered_district = -1
 			mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 			queue_redraw()
@@ -1289,6 +1607,8 @@ func _handle_left_click(local_pos: Vector2) -> void:
 	elif not fullscreen_view and play_turn_button_rect.has_point(local_pos):
 		if game.has_method("_play_combat_turn"):
 			game.call("_play_combat_turn")
+	elif not fullscreen_view and hold_turn_button_rect.has_point(local_pos):
+		game.call("_hold_combat_turn")
 	elif _is_destination_marker_click(local_pos):
 		if game.has_method("_play_combat_turn"):
 			game.call("_play_combat_turn")
@@ -1317,7 +1637,7 @@ func _is_active_map_view() -> bool:
 
 func _is_weapon_hud_zone(local_pos: Vector2) -> bool:
 	var slot_center := _weapon_slot_center(0)
-	var rect := Rect2(slot_center - Vector2(48.0, 44.0), Vector2(224.0, 88.0))
+	var rect := Rect2(slot_center - Vector2(48.0, 44.0), Vector2(282.0 if is_instance_valid(extra_rockets) else 224.0, 88.0))
 	return rect.has_point(local_pos)
 
 func _weapon_slot_center(index: int) -> Vector2:
@@ -1327,18 +1647,62 @@ func _hovered_weapon_index() -> int:
 	return _weapon_index_at(get_local_mouse_position())
 
 func _weapon_index_at(mouse_pos: Vector2) -> int:
-	for i in range(2):
+	for i in range(4):
+		if i == 3 and not is_instance_valid(extra_rockets):
+			continue
+		if i == 0 and not player_turret_equipped:
+			continue
+		if (i == 1 and player_missile_count <= 0) or (i == 2 and not is_instance_valid(aux_laser)):
+			continue
 		var center: Vector2 = _weapon_slot_center(i)
 		var rect := Rect2(center - Vector2(30.0, 30.0), Vector2(60.0, 60.0))
 		if rect.has_point(mouse_pos):
 			return i
 	return -1
 
+func configure_player_turret(kit: Dictionary) -> void:
+	player_turret_equipped = not kit.is_empty()
+	player_cannon_equipped = bool(kit.get("cannon", false))
+	player_pulse_equipped = bool(kit.get("pulse", false))
+	player_rail_equipped = bool(kit.get("rail", false))
+	player_shotgun_equipped = bool(kit.get("shotgun", false))
+	player_laser_color = Color("#be9cff") if player_pulse_equipped else (Color("#ffbd73") if player_cannon_equipped else Color("#52f6ff"))
+	player_weapon_range = float(kit.get("range", 0.0))
+	player_weapon_rate = float(kit.get("rate", 1.0))
+	player_weapon_damage_min = int(kit.get("min_damage", 0))
+	player_weapon_damage_max = int(kit.get("max_damage", 0))
+	if is_instance_valid(player_turret):
+		player_turret.visible = player_turret_equipped
+		var surface := pulse_surface if player_pulse_equipped else (cannon_surface if player_cannon_equipped else laser_surface)
+		if player_rail_equipped and rail_surface != null:
+			surface = rail_surface
+		if player_shotgun_equipped and shotgun_surface != null:
+			surface = shotgun_surface
+		if surface != null:
+			player_turret.texture = surface
+			player_turret.scale = Vector2.ONE * ((12.5 if player_rail_equipped else (14.0 if player_cannon_equipped else 9.5)) / surface.get_width())
+			player_turret.offset = Vector2(0.0, -surface.get_height() * 0.16) if player_rail_equipped else Vector2.ZERO
+	if not player_turret_equipped:
+		weapon_orders.erase(0)
+		if selected_weapon_index == 0:
+			selected_weapon_index = -1
+
+func _update_rocket_module() -> void:
+	if is_instance_valid(player_rocket_module):
+		player_rocket_module.visible = player_missile_count > 0
+		player_rocket_module.texture = mortar_texture if player_mortar_equipped and mortar_texture != null else rocket_module_texture
+		if player_rocket_module.texture != null:
+			player_rocket_module.scale = Vector2(10.0 if active_body_model == "gt" else 16.0 + 2.0 * player_missile_count, 22.0) / player_rocket_module.texture.get_size()
+
 func _hovered_weapon_range() -> float:
-	return player_missile_range if _hovered_weapon_index() == 1 else player_weapon_range
+	match _hovered_weapon_index():
+		1: return player_missile_range
+		2: return float(aux_turret_kit.get("range", 0.0))
+		3: return EXTRA_ROCKET_RANGE
+	return player_weapon_range
 
 func _hovered_weapon_color() -> Color:
-	return Color("#ffcf5a") if _hovered_weapon_index() == 1 else player_laser_color
+	return _weapon_color(_hovered_weapon_index())
 
 func _assign_weapon_target(local_pos: Vector2) -> void:
 	var target := _target_at_screen(local_pos)
@@ -1384,10 +1748,20 @@ func _mark_targeted_vehicle(target: Dictionary, weapon_index: int) -> void:
 		friendly_cars[index] = car
 
 func _weapon_label(index: int) -> String:
+	if index == 2:
+		return "Т2"
+	if index == 3:
+		return "Р2"
 	return "Р" if index == 1 else "Л"
 
 func _weapon_color(index: int) -> Color:
-	return Color("#ffcf5a") if index == 1 else player_laser_color
+	if index == 2:
+		match _turret_kind(aux_turret_kit):
+			"cannon", "shotgun": return Color("#ffbd73")
+			"pulse": return Color("#be9cff")
+			"rail": return Color("#94bdff")
+		return Color("#88ffdd")
+	return Color("#ffcf5a") if index == 1 or index == 3 else player_laser_color
 
 func _resolve_weapon_target(weapon_index: int) -> Dictionary:
 	if weapon_orders.has(weapon_index):
@@ -1474,20 +1848,10 @@ func _draw() -> void:
 		return
 	_clamp_camera()
 	draw_rect(Rect2(Vector2.ZERO, size), MAP_BACKGROUND, true)
-	_draw_ground()
 	_draw_node_labels()
 	_draw_vehicle()
 	if overlay != null:
 		overlay.queue_redraw()
-
-func _draw_ground() -> void:
-	var step := 120
-	var start_x := int(camera_offset.x / step) * step
-	var start_y := int(camera_offset.y / step) * step
-	for x in range(start_x, int(camera_offset.x + size.x) + step, step):
-		draw_line(_to_screen(Vector2(x, camera_offset.y)), _to_screen(Vector2(x, camera_offset.y + size.y)), Color("#d5e1e3", 0.055), 1.0)
-	for y in range(start_y, int(camera_offset.y + size.y) + step, step):
-		draw_line(_to_screen(Vector2(camera_offset.x, y)), _to_screen(Vector2(camera_offset.x + size.x, y)), Color("#d5e1e3", 0.055), 1.0)
 
 func _draw_rain() -> void:
 	if game == null or size.x <= 0.0 or size.y <= 0.0:
@@ -1899,8 +2263,9 @@ func _spawn_pirate() -> void:
 		player_forward = game.vehicle_velocity.normalized()
 	var side: Vector2 = player_forward.orthogonal()
 	pirate_pos = game.player_pos - player_forward * road_bump_rng.randf_range(420.0, 640.0) + side * road_bump_rng.randf_range(-180.0, 180.0)
-	pirate_pos.x = clamp(pirate_pos.x, 0.0, WORLD_SIZE.x)
-	pirate_pos.y = clamp(pirate_pos.y, 0.0, WORLD_SIZE.y)
+	pirate_pos = _vehicle_spawn_position(pirate_pos, true)
+	if not pirate_pos.is_finite():
+		return
 	pirate_angle = player_forward.angle()
 	pirate_speed = road_bump_rng.randf_range(145.0, 190.0)
 	pirate_hull = 100
@@ -1930,8 +2295,9 @@ func _spawn_extra_pirate() -> void:
 		player_forward = game.vehicle_velocity.normalized()
 	var side: Vector2 = player_forward.orthogonal()
 	var pos: Vector2 = game.player_pos - player_forward * road_bump_rng.randf_range(360.0, 620.0) + side * road_bump_rng.randf_range(-230.0, 230.0)
-	pos.x = clamp(pos.x, 0.0, WORLD_SIZE.x)
-	pos.y = clamp(pos.y, 0.0, WORLD_SIZE.y)
+	pos = _vehicle_spawn_position(pos, true)
+	if not pos.is_finite():
+		return
 	var root := _make_simple_vehicle(pirate_car_texture, Color("#ff7f73"), 0.94, pirate_light_front_texture, pirate_light_back_texture)
 	debug_pirates.append({
 		"id": "pirate_%d" % debug_pirates.size(),
@@ -1975,14 +2341,10 @@ func _update_debug_pirates(delta: float) -> void:
 			var pos: Vector2 = enemy["pos"]
 			var to_player: Vector2 = game.player_pos - pos
 			if to_player.length() > 1.0:
-				var angle: float = float(enemy["angle"])
-				var desired_angle: float = to_player.angle()
-				var angle_delta: float = wrapf(desired_angle - angle, -PI, PI)
-				angle += clamp(angle_delta, -1.55 * delta, 1.55 * delta)
 				var speed: float = min(float(enemy["speed"]), max(56.0, to_player.length() * 0.32))
-				pos += Vector2.RIGHT.rotated(angle) * speed * delta
-				enemy["pos"] = pos
-				enemy["angle"] = angle
+				var drive := _drive_npc(pos, game.player_pos, float(enemy["angle"]), speed, 1.55, delta, enemy["root"])
+				enemy["pos"] = Vector2(drive.x, drive.y)
+				enemy["angle"] = drive.z
 				debug_pirates[i] = enemy
 		_update_debug_pirate_node(enemy)
 
@@ -1990,60 +2352,8 @@ func _update_debug_pirate_node(enemy: Dictionary) -> void:
 	var root: Node2D = enemy["root"] as Node2D
 	if not is_instance_valid(root):
 		return
-	root.position = _to_screen(enemy["pos"])
+	root.position = enemy["pos"]
 	root.rotation = float(enemy["angle"]) + PI * 0.5
-
-func _ensure_enemy_headlight_cones(required_count: int) -> void:
-	if enemy_headlight_root == null:
-		return
-	while enemy_headlight_cones.size() < required_count:
-		var cone := Polygon2D.new()
-		cone.z_as_relative = false
-		var material := CanvasItemMaterial.new()
-		material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
-		cone.material = material
-		enemy_headlight_root.add_child(cone)
-		enemy_headlight_cones.append(cone)
-	for i in range(enemy_headlight_cones.size()):
-		enemy_headlight_cones[i].visible = i < required_count
-
-func _enemy_headlight_polygon(length: float, spread: float, neck: float) -> PackedVector2Array:
-	return PackedVector2Array([
-		Vector2.ZERO,
-		Vector2(length * 0.18, -neck),
-		Vector2(length, -spread),
-		Vector2(length, spread),
-		Vector2(length * 0.18, neck)
-	])
-
-func _set_enemy_headlight_cone(cone: Polygon2D, world_pos: Vector2, angle: float, length: float, spread: float, neck: float, color: Color) -> void:
-	var forward := Vector2.RIGHT.rotated(angle)
-	cone.position = _to_screen(world_pos + forward * 32.0)
-	cone.rotation = angle
-	cone.polygon = _enemy_headlight_polygon(length, spread, neck)
-	cone.color = color
-	cone.visible = true
-
-func _update_enemy_headlight_cones() -> void:
-	if enemy_headlight_root == null:
-		return
-	var sources: Array[Dictionary] = []
-	if pirate_active and pirate_root != null and pirate_root.visible:
-		sources.append({"pos": pirate_pos, "angle": pirate_angle, "strength": 1.0})
-	for enemy in debug_pirates:
-		var root: Node2D = enemy.get("root", null) as Node2D
-		if is_instance_valid(root) and root.visible:
-			sources.append({"pos": enemy.get("pos", Vector2.ZERO), "angle": float(enemy.get("angle", 0.0)), "strength": 0.92})
-	_ensure_enemy_headlight_cones(sources.size() * 2)
-	for i in range(sources.size()):
-		var source := sources[i]
-		var pos: Vector2 = source["pos"]
-		var angle: float = float(source["angle"])
-		var strength: float = float(source["strength"])
-		var wide := enemy_headlight_cones[i * 2]
-		var core := enemy_headlight_cones[i * 2 + 1]
-		_set_enemy_headlight_cone(wide, pos, angle, 720.0, 240.0, 34.0, Color(1.0, 0.70, 0.34, 0.040 * strength))
-		_set_enemy_headlight_cone(core, pos, angle, 520.0, 82.0, 16.0, Color(1.0, 0.86, 0.56, 0.082 * strength))
 
 func _random_laser_color() -> Color:
 	var colors := [
@@ -2064,16 +2374,12 @@ func _update_pirate_motion(delta: float) -> void:
 		return
 	if distance <= 1.0:
 		return
-	var desired_angle: float = to_player.angle()
-	var angle_delta: float = wrapf(desired_angle - pirate_angle, -PI, PI)
-	var turn_rate: float = 1.9
-	pirate_angle += clamp(angle_delta, -turn_rate * delta, turn_rate * delta)
 	var target_speed: float = clamp(distance * 0.42, 95.0, pirate_speed)
 	if distance < 190.0:
 		target_speed = 70.0
-	pirate_pos += Vector2.RIGHT.rotated(pirate_angle) * target_speed * delta
-	pirate_pos.x = clamp(pirate_pos.x, 0.0, WORLD_SIZE.x)
-	pirate_pos.y = clamp(pirate_pos.y, 0.0, WORLD_SIZE.y)
+	var drive := _drive_npc(pirate_pos, game.player_pos, pirate_angle, target_speed, 1.9, delta, pirate_root)
+	pirate_pos = Vector2(drive.x, drive.y)
+	pirate_angle = drive.z
 
 func _update_pirate_laser(delta: float) -> void:
 	if not pirate_active or not pirate_root.visible:
@@ -2108,6 +2414,7 @@ func _update_pirate_laser(delta: float) -> void:
 		_update_health_bar_node(_to_screen(game.player_pos))
 		_spawn_damage_popup(damage_amount, damage_pos, clamp(float(game.hull) / 100.0, 0.0, 1.0))
 		_spawn_impact_sparks(damage_pos, pirate_laser_color, 28)
+		_play_weapon_sound("metal_hit")
 		if game.has_method("_queue_combat_pause_at_next_waypoint"):
 			game.call("_queue_combat_pause_at_next_waypoint")
 	var to_player: Vector2 = game.player_pos - pirate_pos
@@ -2162,6 +2469,7 @@ func _start_pirate_turn_laser() -> void:
 	pirate_laser_color = weapon.get("color", pirate_laser_color)
 	pirate_fire_duration = road_bump_rng.randf_range(0.14, 0.28)
 	pirate_fire_phase = pirate_fire_duration
+	_play_weapon_sound("pirate_laser")
 	pirate_laser_blur = road_bump_rng.randf_range(0.72, 1.45)
 	pirate_laser_curve_seed = road_bump_rng.randf_range(0.0, TAU)
 	pirate_laser_curve_strength = road_bump_rng.randf_range(12.0, 38.0)
@@ -2219,12 +2527,18 @@ func _assign_auto_response_targets() -> void:
 	var target := _auto_response_target()
 	if target.is_empty():
 		return
-	if not weapon_orders.has(0) and player_weapon_cooldown <= 0.0:
+	if player_turret_equipped and not weapon_orders.has(0) and player_weapon_cooldown <= 0.0:
 		weapon_orders[0] = target
 		_mark_targeted_vehicle(target, 0)
-	if not weapon_orders.has(1) and player_missile_cooldown <= 0.0:
+	if player_missile_count > 0 and not weapon_orders.has(1) and player_missile_cooldown <= 0.0:
 		weapon_orders[1] = target
 		_mark_targeted_vehicle(target, 1)
+	if is_instance_valid(aux_laser) and not weapon_orders.has(2):
+		weapon_orders[2] = target
+		_mark_targeted_vehicle(target, 2)
+	if is_instance_valid(extra_rockets) and not weapon_orders.has(3):
+		weapon_orders[3] = target
+		_mark_targeted_vehicle(target, 3)
 	queue_redraw()
 
 func _auto_response_target() -> Dictionary:
@@ -2254,9 +2568,13 @@ func _has_ordered_ready_weapon_in_range() -> bool:
 		if target.is_empty():
 			continue
 		var distance: float = game.player_pos.distance_to(target["pos"])
-		if index == 0 and player_weapon_cooldown <= 0.0 and player_fire_phase <= 0.0 and distance <= player_weapon_range:
+		if index == 2 and is_instance_valid(aux_laser) and aux_laser_cooldown <= 0.0 and distance <= float(aux_turret_kit.get("range", 0.0)):
 			return true
-		if index == 1 and player_missile_cooldown <= 0.0 and distance <= player_missile_range:
+		if index == 3 and is_instance_valid(extra_rockets) and extra_rocket_cooldown <= 0.0 and distance <= EXTRA_ROCKET_RANGE:
+			return true
+		if index == 0 and player_turret_equipped and player_weapon_cooldown <= 0.0 and player_fire_phase <= 0.0 and distance <= player_weapon_range:
+			return true
+		if index == 1 and player_missile_count > 0 and player_missile_cooldown <= 0.0 and distance <= player_missile_range:
 			return true
 	return false
 
@@ -2264,20 +2582,53 @@ func _primary_pirate_can_fire() -> bool:
 	return pirate_active and game != null and pirate_fire_phase <= 0.0 and _ready_enemy_weapon_index(pirate_weapons, pirate_pos) != -1
 
 func _execute_player_turn_weapons() -> void:
-	if game == null:
+	if game == null or game.hull <= 0:
 		return
+	var next_shot_delay := 0.0
 	var laser_target: Dictionary = _resolve_weapon_target(0)
 	if player_weapon_cooldown <= 0.0 and player_fire_phase <= 0.0 and not laser_target.is_empty():
-		if game.player_pos.distance_to(laser_target["pos"]) <= player_weapon_range:
+		if player_turret_equipped and game.player_pos.distance_to(laser_target["pos"]) <= player_weapon_range:
 			_mark_targeted_vehicle(laser_target, 0)
 			_start_player_weapon_fire(laser_target)
 			player_weapon_cooldown = player_weapon_rate
+			next_shot_delay = CANNON_ROUNDS * CANNON_INTERVAL + 0.06 if player_cannon_equipped else 0.20
 	var missile_target: Dictionary = _resolve_weapon_target(1)
-	if player_missile_cooldown <= 0.0 and not missile_target.is_empty():
+	if player_missile_count > 0 and player_missile_cooldown <= 0.0 and not missile_target.is_empty():
 		if game.player_pos.distance_to(missile_target["pos"]) <= player_missile_range:
 			_mark_targeted_vehicle(missile_target, 1)
-			_fire_player_missile_salvo(missile_target)
 			player_missile_cooldown = player_missile_rate
+			_schedule_mount_shot(1, player_rocket_module, missile_target, next_shot_delay)
+			next_shot_delay += 0.26 * float(player_missile_count)
+	if is_instance_valid(aux_laser) and aux_laser_cooldown <= 0.0:
+		var target := _resolve_weapon_target(2)
+		if not target.is_empty() and Vector2(game.player_pos).distance_to(target["pos"]) <= float(aux_turret_kit.get("range", 0.0)):
+			_mark_targeted_vehicle(target, 2)
+			aux_laser_cooldown = float(aux_turret_kit.get("rate", 1.0))
+			_schedule_mount_shot(2, aux_laser, target, next_shot_delay)
+			next_shot_delay += 0.17
+	if is_instance_valid(extra_rockets) and extra_rocket_cooldown <= 0.0:
+		var target := _resolve_weapon_target(3)
+		if not target.is_empty() and Vector2(game.player_pos).distance_to(target["pos"]) <= EXTRA_ROCKET_RANGE:
+			_mark_targeted_vehicle(target, 3)
+			extra_rocket_cooldown = EXTRA_ROCKET_RATE
+			_schedule_mount_shot(3, extra_rockets, target, next_shot_delay)
+
+func _schedule_mount_shot(slot: int, mount: Sprite2D, target: Dictionary, delay: float) -> void:
+	if delay <= 0.0:
+		_fire_scheduled_mount(slot, mount, target)
+	else:
+		get_tree().create_timer(delay + road_bump_rng.randf_range(0.0, 0.06)).timeout.connect(_fire_scheduled_mount.bind(slot, mount, target))
+
+func _fire_scheduled_mount(slot: int, mount: Sprite2D, target: Dictionary) -> void:
+	if not is_instance_valid(mount) or game == null or game.at_location or game.hull <= 0:
+		return
+	var resolved := _resolve_target_ref(target)
+	if resolved.is_empty():
+		return
+	if slot == 2:
+		_fire_aux_turret(resolved)
+	elif slot == 3 or player_missile_count > 0:
+		_fire_player_missile_salvo(resolved, slot == 3)
 
 func _advance_weapon_turn_cooldowns() -> void:
 	player_turn_weapon_queued = false
@@ -2285,6 +2636,8 @@ func _advance_weapon_turn_cooldowns() -> void:
 	pirate_turn_weapon_queued = false
 	pirate_turn_weapon_delay = 0.0
 	player_weapon_cooldown = max(0.0, player_weapon_cooldown - 1.0)
+	aux_laser_cooldown = maxf(0.0, aux_laser_cooldown - 1.0)
+	extra_rocket_cooldown = maxf(0.0, extra_rocket_cooldown - 1.0)
 	player_missile_cooldown = max(0.0, player_missile_cooldown - 1.0)
 	for i in range(pirate_weapons.size()):
 		var weapon: Dictionary = pirate_weapons[i]
@@ -2327,17 +2680,225 @@ func _has_active_combat_targets() -> bool:
 		return true
 	return not debug_pirates.is_empty()
 
+func has_turn_fire_in_flight() -> bool:
+	return player_fire_phase > 0.0 or pirate_fire_phase > 0.0 or not player_missiles.is_empty()
+
 func _start_player_weapon_fire(target: Dictionary) -> void:
 	if player_laser_root == null or target.is_empty():
 		return
 	player_laser_target = target
 	player_fire_duration = road_bump_rng.randf_range(0.16, 0.30)
+	if player_cannon_equipped:
+		player_fire_duration = CANNON_ROUNDS * CANNON_INTERVAL
+		cannon_rounds_ejected = 0
+		_play_cannon_burst()
+	else:
+		_play_weapon_sound("shotgun" if player_shotgun_equipped else ("rail" if player_rail_equipped else ("pulse" if player_pulse_equipped else "laser")))
 	player_fire_phase = player_fire_duration
 	player_laser_blur = road_bump_rng.randf_range(0.66, 1.18)
 	player_laser_curve_seed = road_bump_rng.randf_range(0.0, TAU)
 	player_laser_curve_strength = road_bump_rng.randf_range(8.0, 26.0)
 	player_laser_damage_applied = false
-	player_laser_color = Color("#52f6ff").lerp(Color("#91ffcf"), road_bump_rng.randf_range(0.0, 0.45))
+	player_laser_color = Color("#ffbd73") if player_cannon_equipped else Color("#52f6ff").lerp(Color("#91ffcf"), road_bump_rng.randf_range(0.0, 0.45))
+	if player_pulse_equipped:
+		player_laser_color = Color("#be9cff")
+	if player_shotgun_equipped:
+		player_laser_color = Color("#ffcc8d")
+
+func _update_engine_audio(delta: float) -> void:
+	if not _is_active_map_view() or game.at_location or game.hull <= 0:
+		if is_instance_valid(engine_audio):
+			engine_audio.volume_db = lerpf(engine_audio.volume_db, -60.0, 1.0 - exp(-delta * 8.0))
+			if engine_audio.volume_db < -56.0:
+				engine_audio.stop()
+		return
+	if engine_audio == null:
+		engine_audio = AudioStreamPlayer.new()
+		engine_audio.stream = _shared_engine_loop()
+		engine_audio.volume_db = -60.0
+		add_child(engine_audio)
+	if not engine_audio.playing:
+		engine_audio.play()
+	var speed: float = clampf(float(game.vehicle_current_speed) / 150.0, 0.0, 1.0)
+	var braking: bool = game.vehicle_is_braking
+	var pitch := 0.80 + speed * (0.43 if braking else 0.79)
+	var volume := -28.0 + speed * (2.0 if braking else 7.0)
+	engine_audio.pitch_scale = lerpf(engine_audio.pitch_scale, pitch, 1.0 - exp(-delta * (7.0 if braking else 3.5)))
+	engine_audio.volume_db = lerpf(engine_audio.volume_db, volume, 1.0 - exp(-delta * 4.0))
+
+func _shared_engine_loop() -> AudioStreamWAV:
+	if engine_loop == null:
+		engine_loop = _make_engine_loop()
+	return engine_loop
+
+func _update_traffic_engines(delta: float) -> void:
+	var audible: bool = _is_active_map_view() and not game.at_location and game.hull > 0
+	_update_traffic_engine(pirate_root, pirate_pos, audible and pirate_active, 0.83, delta)
+	for enemy in debug_pirates:
+		_update_traffic_engine(enemy["root"], enemy["pos"], audible, 0.89, delta)
+	for car in friendly_cars:
+		_update_traffic_engine(car["root"], car["pos"], audible, 1.03, delta)
+
+func _update_traffic_engine(root: Node2D, world_pos: Vector2, audible: bool, tone: float, delta: float) -> void:
+	if not is_instance_valid(root):
+		return
+	var previous: Vector2 = root.get_meta("engine_pos", world_pos)
+	root.set_meta("engine_pos", world_pos)
+	var distance: float = world_pos.distance_to(Vector2(game.player_pos))
+	var gain := 1.0 - smoothstep(90.0, 650.0, distance) if audible and root.visible else 0.0
+	var voice: AudioStreamPlayer = root.get_meta("engine_voice") if root.has_meta("engine_voice") else null
+	if not is_instance_valid(voice):
+		if gain <= 0.0:
+			return
+		voice = AudioStreamPlayer.new()
+		voice.stream = _shared_engine_loop()
+		voice.volume_db = -60.0
+		root.add_child(voice)
+		root.set_meta("engine_voice", voice)
+	var speed := clampf(previous.distance_to(world_pos) / maxf(delta * 150.0, 0.001), 0.0, 1.0)
+	var pitch := tone * lerpf(0.80, 1.47, speed)
+	var volume := -31.0 + speed * 6.0 + linear_to_db(maxf(gain, 0.001))
+	var blend := 1.0 - exp(-delta * 6.0)
+	voice.pitch_scale = lerpf(voice.pitch_scale, pitch, blend)
+	voice.volume_db = lerpf(voice.volume_db, maxf(-60.0, volume), blend)
+	if gain > 0.0 and not voice.playing:
+		voice.play(randf())
+	elif gain <= 0.0 and voice.volume_db < -55.0:
+		voice.stop()
+
+func _make_engine_loop() -> AudioStreamWAV:
+	var stream := AudioStreamWAV.new()
+	stream.mix_rate = 22050
+	stream.format = AudioStreamWAV.FORMAT_16_BITS
+	stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	stream.loop_end = stream.mix_rate
+	var samples := PackedByteArray()
+	samples.resize(stream.mix_rate * 2)
+	for i in range(stream.mix_rate):
+		var phase := TAU * float(i) / stream.mix_rate
+		var uneven := 0.72 + 0.17 * cos(phase * 3.0) + 0.11 * cos(phase * 7.0)
+		var firing := pow(0.5 + 0.5 * cos(phase * 24.0 + 0.19 * sin(phase * 5.0)), 3.0) - 0.3125
+		var rumble := sin(phase * 48.0 + 0.65 * sin(phase * 6.0)) * 0.27 + sin(phase * 72.0) * 0.13
+		var chatter := sin(phase * 139.0) * sin(phase * 97.0) * 0.16
+		var sample := (firing * 0.49 + rumble + chatter * (firing + 0.42)) * uneven
+		samples.encode_s16(i * 2, roundi(sample * 32767.0))
+	stream.data = samples
+	return stream
+
+func _play_weapon_sound(kind: String, playback_speed := 1.0) -> void:
+	var stream: AudioStreamWAV = weapon_sounds.get(kind)
+	if stream == null:
+		stream = _make_weapon_sound(kind)
+		weapon_sounds[kind] = stream
+	var voice := AudioStreamPlayer.new()
+	voice.stream = stream
+	voice.volume_db = -16.0
+	if kind == "metal_hit":
+		voice.volume_db = -15.0
+	elif kind == "mortar_whistle":
+		voice.volume_db = -15.0
+	elif kind == "mortar":
+		voice.volume_db = -9.0
+	voice.pitch_scale = playback_speed * (1.0 if kind == "mortar_whistle" else randf_range(0.94, 1.06))
+	add_child(voice)
+	voice.finished.connect(voice.queue_free)
+	voice.play()
+
+func _make_weapon_sound(kind: String) -> AudioStreamWAV:
+	var stream := AudioStreamWAV.new()
+	stream.mix_rate = 44100
+	stream.format = AudioStreamWAV.FORMAT_16_BITS
+	stream.stereo = true
+	var duration := 0.36
+	match kind:
+		"rocket_launch", "rocket_hit":
+			duration = 0.58
+		"pulse":
+			duration = 0.32
+		"mortar":
+			duration = 0.43
+		"mortar_whistle":
+			duration = MORTAR_WHISTLE_DURATION
+	var count := roundi(duration * stream.mix_rate)
+	var samples := PackedByteArray()
+	samples.resize(count * 4)
+	var dry := PackedFloat32Array()
+	dry.resize(count)
+	var noise_rng := RandomNumberGenerator.new()
+	noise_rng.seed = 48191
+	var filtered := 0.0
+	var bass_noise := 0.0
+	for i in range(count):
+		var t := float(i) / stream.mix_rate
+		var noise := noise_rng.randf_range(-1.0, 1.0)
+		filtered = lerpf(filtered, noise, 0.16)
+		bass_noise = lerpf(bass_noise, noise, 0.035)
+		var crack := (noise - filtered) * exp(-t * 108.0)
+		var body := sin(TAU * (94.0 * t - 48.0 * t * t)) * exp(-t * 20.0)
+		var sample := 0.0
+		match kind:
+			"rocket_launch":
+				sample = crack * 0.22 + body * 0.34 + (bass_noise * 2.0 + filtered * 0.68) * exp(-t * 7.5)
+			"rocket_hit":
+				sample = crack * 0.52 + body * 0.58 + (bass_noise * 2.0 + filtered * 0.6) * exp(-t * 10.0)
+			"metal_hit":
+				var plate := sin(TAU * 421.0 * t) + 0.60 * sin(TAU * 827.0 * t) + 0.37 * sin(TAU * 1379.0 * t)
+				var rattle := (noise - filtered) * exp(-absf(t - 0.028) * 230.0)
+				sample = crack * 0.61 + body * 0.18 + plate * 0.26 * exp(-t * 27.0) + rattle * 0.17
+			"pulse":
+				var flutter := 0.55 + 0.45 * cos(TAU * 38.0 * t)
+				sample = body * 0.68 + crack * 0.32 + filtered * flutter * exp(-t * 13.0)
+			"rail":
+				sample = crack * 0.68 + body * 0.56 + filtered * exp(-t * 24.0)
+			"shotgun":
+				sample = crack * 0.74 + body * 0.66 + (filtered + bass_noise) * exp(-t * 17.0)
+			"mortar":
+				var pressure := sin(TAU * 61.0 * t) * exp(-t * 24.0)
+				var vent := (bass_noise * 2.2 + filtered * 0.24) * exp(-t * 19.0)
+				sample = pressure * 0.78 + vent + crack * 0.17
+			"mortar_whistle":
+				var phase := TAU * (1120.0 * t - 370.0 * t * t)
+				var approach := smoothstep(0.0, 0.16, t) * lerpf(0.32, 1.0, t / duration)
+				var air := 0.78 + 0.22 * sin(TAU * 21.0 * t)
+				sample = (sin(phase) * 0.36 * air + filtered * 0.42) * approach
+			_:
+				var frequency := 152.0 if kind == "pirate_laser" else 218.0
+				var phase := TAU * frequency * (t - 0.85 * t * t)
+				var arc := sin(phase) * sin(phase * 2.17 + noise * 0.25)
+				sample = crack * 0.45 + body * 0.46 + (arc * 0.32 + filtered * 1.2) * exp(-t * 17.0)
+		dry[i] = sample * smoothstep(0.0, 0.001, t)
+		var echo_a: float = dry[i - 706] if i >= 706 else 0.0
+		var echo_b: float = dry[i - 1323] if i >= 1323 else 0.0
+		var fade := 1.0 - smoothstep(duration - 0.06, duration, t)
+		samples.encode_s16(i * 4, roundi(tanh((dry[i] + echo_a * 0.22 + echo_b * 0.07) * 1.4) * fade * 32767.0))
+		samples.encode_s16(i * 4 + 2, roundi(tanh((dry[i] + echo_a * 0.08 + echo_b * 0.23) * 1.4) * fade * 32767.0))
+	stream.data = samples
+	return stream
+
+func _play_cannon_burst() -> void:
+	if cannon_burst_stream == null:
+		var stream := AudioStreamWAV.new()
+		stream.mix_rate = 22050
+		stream.format = AudioStreamWAV.FORMAT_16_BITS
+		var samples := PackedByteArray()
+		samples.resize(roundi(CANNON_ROUNDS * CANNON_INTERVAL * stream.mix_rate) * 2)
+		var sound_rng := RandomNumberGenerator.new()
+		sound_rng.seed = 98241
+		for i in range(0, samples.size(), 2):
+			var t := fposmod(float(i) / (2.0 * stream.mix_rate), CANNON_INTERVAL)
+			var crack := sound_rng.randf_range(-1.0, 1.0) * exp(-t * 145.0)
+			var thump := sin(t * TAU * 135.0) * exp(-t * 68.0)
+			var sample := roundi((crack * 0.60 + thump * 0.30) * 32767.0)
+			samples.encode_s16(i, sample)
+		stream.data = samples
+		cannon_burst_stream = stream
+	var voice := AudioStreamPlayer.new()
+	voice.stream = cannon_burst_stream
+	voice.volume_db = -12.0
+	voice.pitch_scale = randf_range(0.97, 1.03)
+	add_child(voice)
+	voice.finished.connect(voice.queue_free)
+	voice.play()
 
 func _update_weapon_range_light() -> void:
 	if weapon_range_light == null or game == null:
@@ -2368,6 +2929,8 @@ func _update_player_laser(delta: float) -> void:
 	var resolved_target: Dictionary = _resolve_target_ref(player_laser_target)
 	var firing: bool = player_fire_phase > 0.0 and not resolved_target.is_empty()
 	player_laser_root.visible = firing
+	if is_instance_valid(cannon_flash):
+		cannon_flash.hide()
 	if not firing:
 		player_laser_damage_applied = false
 		player_laser_points.clear()
@@ -2379,19 +2942,87 @@ func _update_player_laser(delta: float) -> void:
 	var target_pos: Vector2 = resolved_target["pos"]
 	var to_target: Vector2 = target_pos - game.player_pos
 	var shot_forward: Vector2 = to_target.normalized() if to_target.length() > 0.01 else Vector2.RIGHT.rotated(game.vehicle_angle)
-	player_laser_start = game.player_pos + shot_forward * 30.0
+	var muzzle_distance := 8.0 if player_rail_equipped else (6.1 if player_cannon_equipped else 4.45)
+	var mount_world: Vector2 = Vector2(game.player_pos) + vehicle_root.transform.basis_xform(_turret_mount_position())
+	shot_forward = mount_world.direction_to(target_pos) if mount_world.distance_squared_to(target_pos) > 0.01 else shot_forward
+	player_laser_start = mount_world + shot_forward * (muzzle_distance if player_turret != null else 30.0)
 	player_laser_end = target_pos
 	player_laser_points = _make_laser_curve_points(player_laser_start, player_laser_end, player_laser_curve_strength, player_laser_curve_seed)
-	if not player_laser_damage_applied:
+	var fire_progress: float = 1.0 - player_fire_phase / max(0.01, player_fire_duration)
+	if player_cannon_equipped:
+		var rounds := mini(CANNON_ROUNDS, 1 + floori(fire_progress * CANNON_ROUNDS))
+		while cannon_rounds_ejected < rounds:
+			_eject_cannon_casing(mount_world, shot_forward)
+			cannon_rounds_ejected += 1
+	if not player_laser_damage_applied and (not player_cannon_equipped or fire_progress >= 0.91):
 		var damage_amount: int = road_bump_rng.randi_range(player_weapon_damage_min, player_weapon_damage_max)
 		player_laser_damage_applied = true
+		_play_weapon_sound("metal_hit")
 		_apply_damage_to_target(resolved_target, damage_amount, player_laser_color)
 		if resolved_target.get("type", "") == "primary_pirate" and not pirate_active:
 			return
-	var fire_progress: float = 1.0 - player_fire_phase / max(0.01, player_fire_duration)
+	if player_shotgun_equipped:
+		var flash := 1.0 - smoothstep(0.08, 0.58, fire_progress)
+		var side := shot_forward.orthogonal()
+		var traces: Array[Line2D] = [player_laser_trace_line, player_laser_line, player_laser_inner_glow]
+		for i in range(traces.size()):
+			var spread := float(i - 1)
+			var muzzle := player_laser_start - shot_forward * 2.7 + side * spread * 1.45
+			var endpoint := player_laser_end + side * spread * 14.0
+			var head := muzzle.lerp(endpoint, clampf(fire_progress * 4.0, 0.0, 1.0))
+			traces[i].points = PackedVector2Array([_to_screen(muzzle), _to_screen(head)])
+			traces[i].width = 1.6
+			traces[i].default_color = Color("#ffdcaa", flash * 0.90)
+		player_laser_glow.points = PackedVector2Array()
+		player_laser_outer_glow.points = PackedVector2Array()
+		player_laser_light.color = player_laser_color
+		player_laser_light.position = _to_screen(player_laser_start)
+		player_laser_light.energy = flash * 4.0
+		for light in player_laser_lights:
+			light.energy = 0.0
+		return
+	if player_cannon_equipped:
+		var flight := fposmod(fire_progress * float(CANNON_ROUNDS), 1.0)
+		var ignition := 1.0 - smoothstep(0.07, 0.40, flight)
+		if cannon_flash == null:
+			cannon_flash = Polygon2D.new()
+			cannon_flash.polygon = PackedVector2Array([Vector2.ZERO, Vector2(5, -4), Vector2(15, 0), Vector2(5, 4)])
+			var material := CanvasItemMaterial.new()
+			material.light_mode = CanvasItemMaterial.LIGHT_MODE_UNSHADED
+			material.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+			cannon_flash.material = material
+			player_laser_root.add_child(cannon_flash)
+		cannon_flash.visible = ignition > 0.0
+		cannon_flash.position = _to_screen(player_laser_start)
+		cannon_flash.rotation = shot_forward.angle()
+		cannon_flash.scale = Vector2.ONE * lerpf(0.55, 1.0, ignition)
+		cannon_flash.color = Color("#fff0be", ignition)
+		var head := player_laser_start.lerp(player_laser_end, flight)
+		var tail := player_laser_start.lerp(player_laser_end, maxf(0.0, flight - 0.22))
+		player_laser_trace_line.points = PackedVector2Array([_to_screen(tail), _to_screen(head)])
+		player_laser_trace_line.width = 1.8
+		player_laser_trace_line.default_color = Color("#ffdb9c", 0.94)
+		for beam in [player_laser_outer_glow, player_laser_glow, player_laser_inner_glow, player_laser_line]:
+			beam.points = PackedVector2Array()
+		player_laser_light.color = player_laser_color
+		player_laser_light.position = _to_screen(player_laser_start)
+		player_laser_light.energy = 3.1 * ignition
+		for light in player_laser_lights:
+			light.energy = 0.0
+		return
 	var trace_alpha: float = clamp(1.0 - fire_progress / 0.34, 0.0, 1.0)
 	var curve_alpha: float = sin(clamp((fire_progress - 0.10) / 0.90, 0.0, 1.0) * PI)
+	if player_rail_equipped:
+		curve_alpha = 0.0
 	var screen_points: PackedVector2Array = _laser_world_points_to_screen(player_laser_points)
+	if player_pulse_equipped:
+		screen_points.clear()
+		var wave := clampf(fire_progress * 1.35, 0.0, 1.0)
+		for i in range(13):
+			var t := lerpf(maxf(0.0, wave - 0.32), wave, float(i) / 12.0)
+			var ripple := sin(t * 52.0 - fire_progress * 16.0) * 5.5 * sin(t * PI)
+			screen_points.append(_to_screen(player_laser_start.lerp(player_laser_end, t) + shot_forward.orthogonal() * ripple))
+		trace_alpha = 0.0
 	var jitter: Vector2 = shot_forward.orthogonal() * sin(Time.get_ticks_msec() * 0.043 + player_laser_curve_seed) * 1.8 * player_laser_blur
 	var laser_core: Color = player_laser_color.lightened(0.25)
 	var laser_glow: Color = player_laser_color
@@ -2402,6 +3033,7 @@ func _update_player_laser(delta: float) -> void:
 	player_laser_inner_glow.width = 6.2 * player_laser_blur
 	player_laser_inner_glow.default_color = _color_with_alpha(laser_core, 0.13 + curve_alpha * 0.30)
 	player_laser_trace_line.width = lerp(0.65, 1.10, trace_alpha)
+	player_laser_line.width = 2.2
 	player_laser_trace_line.default_color = _color_with_alpha(laser_core.lightened(0.35), trace_alpha * 0.88)
 	player_laser_line.default_color = _color_with_alpha(laser_core.lightened(0.18), curve_alpha * 0.90)
 	player_laser_outer_glow.points = _offset_laser_points(screen_points, jitter)
@@ -2421,25 +3053,34 @@ func _update_player_laser(delta: float) -> void:
 		laser_light.energy = 0.9 + curve_alpha * 1.7
 		laser_light.texture_scale = 1.35 + curve_alpha * 0.65
 
-func _fire_player_missile_salvo(target_ref: Dictionary) -> void:
+func _fire_player_missile_salvo(target_ref: Dictionary, extra := false) -> void:
 	if player_missile_root == null or game == null or target_ref.is_empty():
 		return
 	var target_pos: Vector2 = target_ref["pos"]
 	var to_target: Vector2 = target_pos - game.player_pos
-	if to_target.length() > player_missile_range:
+	if to_target.length() > (EXTRA_ROCKET_RANGE if extra else player_missile_range):
 		return
 	var forward: Vector2 = to_target.normalized() if to_target.length() > 0.01 else Vector2.RIGHT.rotated(game.vehicle_angle)
 	var side: Vector2 = forward.orthogonal()
-	for i in range(2):
+	var count := 2 if extra else player_missile_count
+	var launcher := extra_rockets if extra else player_rocket_module
+	var mortar := not extra and player_mortar_equipped
+	for i in range(count):
 		var side_sign: float = -1.0 if i == 0 else 1.0
 		var start: Vector2 = game.player_pos + forward * 32.0 + side * side_sign * 13.0
+		if is_instance_valid(launcher):
+			var tube := (float(i) - float(count - 1) * 0.5) * 4.0
+			var mount := vehicle_root.transform.basis_xform(launcher.position)
+			var aim: Vector2 = (target_pos - Vector2(game.player_pos) - mount).normalized()
+			start = game.player_pos + mount + aim * (0.0 if mortar else 6.0) + aim.orthogonal() * tube
 		var target: Vector2 = target_pos + side * road_bump_rng.randf_range(-14.0, 14.0)
 		var distance: float = start.distance_to(target)
 		var control: Vector2 = start.lerp(target, 0.48) + side * side_sign * clamp(distance * road_bump_rng.randf_range(0.22, 0.38), 70.0, 210.0)
 		control += forward * road_bump_rng.randf_range(-40.0, 55.0)
-		_spawn_player_missile(start, target, control, side_sign, float(i) * road_bump_rng.randf_range(0.16, 0.24), target_ref)
+		_spawn_player_missile(start, target, control, side_sign, float(i) * road_bump_rng.randf_range(0.16, 0.24), target_ref, extra)
 
-func _spawn_player_missile(start: Vector2, target: Vector2, control: Vector2, side_sign: float, launch_delay: float, target_ref: Dictionary) -> void:
+func _spawn_player_missile(start: Vector2, target: Vector2, control: Vector2, side_sign: float, launch_delay: float, target_ref: Dictionary, extra := false) -> void:
+	var mortar := not extra and player_mortar_equipped
 	var color := Color("#ffcf5a").lerp(Color("#ff7a2f"), road_bump_rng.randf_range(0.0, 0.32))
 	var exhaust_color := Color("#ff4a1f").lerp(Color("#ff9a2b"), road_bump_rng.randf_range(0.0, 0.45))
 	var missile_node := Node2D.new()
@@ -2448,10 +3089,11 @@ func _spawn_player_missile(start: Vector2, target: Vector2, control: Vector2, si
 	player_missile_root.add_child(missile_node)
 	var body := Polygon2D.new()
 	body.polygon = PackedVector2Array([
-		Vector2(9.0, 0.0),
-		Vector2(-6.0, -3.6),
-		Vector2(-3.0, 0.0),
-		Vector2(-6.0, 3.6)
+		Vector2(7.0, 0.0),
+		Vector2(3.0, -1.6),
+		Vector2(-5.0, -1.6),
+		Vector2(-5.0, 1.6),
+		Vector2(3.0, 1.6)
 	])
 	body.color = color.lightened(0.12)
 	var body_material := CanvasItemMaterial.new()
@@ -2461,6 +3103,13 @@ func _spawn_player_missile(start: Vector2, target: Vector2, control: Vector2, si
 	var trail_glow := _make_laser_line(10.0, _color_with_alpha(color, 0.0))
 	var trail_core := _make_laser_line(2.0, _color_with_alpha(color.lightened(0.38), 0.0))
 	var exhaust_glow := _make_laser_line(15.0, _color_with_alpha(exhaust_color, 0.0))
+	_soften_weapon_line(trail_glow)
+	_soften_weapon_line(exhaust_glow)
+	var tail_fade := Gradient.new()
+	tail_fade.colors = PackedColorArray([Color(1.0, 1.0, 1.0, 0.0), Color.WHITE])
+	exhaust_glow.gradient = tail_fade
+	trail_glow.gradient = tail_fade
+	trail_core.gradient = tail_fade
 	player_missile_root.add_child(trail_glow)
 	player_missile_root.add_child(trail_core)
 	player_missile_root.add_child(exhaust_glow)
@@ -2489,9 +3138,10 @@ func _spawn_player_missile(start: Vector2, target: Vector2, control: Vector2, si
 		"control": control,
 		"side": side_sign,
 		"age": -launch_delay,
-		"life": life,
+		"life": life * (1.45 if mortar else 1.0),
+		"mortar": mortar,
 		"history": [],
-		"damage": road_bump_rng.randi_range(player_missile_damage_min, player_missile_damage_max),
+		"damage": road_bump_rng.randi_range(10 if extra else player_missile_damage_min, 16 if extra else player_missile_damage_max),
 		"color": color,
 		"exhaust_color": exhaust_color,
 		"target_ref": target_ref,
@@ -2519,7 +3169,14 @@ func _update_player_missiles(delta: float) -> void:
 			player_missiles[i] = missile
 			continue
 		_set_missile_visible(missile, true)
+		if not bool(missile.get("launch_sound_played", false)):
+			missile["launch_sound_played"] = true
+			_play_weapon_sound("mortar" if bool(missile.get("mortar", false)) else "rocket_launch")
 		missile["target"] = resolved_target["pos"]
+		var time_to_hit := life - age
+		if bool(missile.get("mortar", false)) and not bool(missile.get("whistle_played", false)) and age >= 0.24 and time_to_hit > 0.04 and time_to_hit <= MORTAR_WHISTLE_DURATION:
+			missile["whistle_played"] = true
+			_play_weapon_sound("mortar_whistle", clampf(MORTAR_WHISTLE_DURATION / time_to_hit, 1.0, 1.35))
 		var t: float = clamp(age / life, 0.0, 1.0)
 		var eased_t: float = 1.0 - pow(1.0 - t, 1.8)
 		var pos: Vector2 = _sample_missile_curve(missile, eased_t)
@@ -2548,16 +3205,17 @@ func _update_player_missiles(delta: float) -> void:
 		var trail_alpha: float = sin(t * PI)
 		if is_instance_valid(trail_glow):
 			trail_glow.points = trail_points
-			trail_glow.default_color = _color_with_alpha(color, 0.18 * trail_alpha)
+			trail_glow.modulate = Color(color, 0.27 * trail_alpha)
 		if is_instance_valid(trail_core):
 			trail_core.points = trail_points
-			trail_core.default_color = _color_with_alpha(color.lightened(0.35), 0.82 * trail_alpha)
+			trail_core.modulate = Color(color.lightened(0.35), 0.30 * trail_alpha)
 		var exhaust_start: Vector2 = pos - direction * 8.0
 		var exhaust_end: Vector2 = pos - direction * (44.0 + 12.0 * sin(Time.get_ticks_msec() * 0.024 + float(missile["side"])))
 		if is_instance_valid(exhaust_glow):
+			exhaust_glow.visible = not bool(missile.get("mortar", false))
 			exhaust_glow.points = PackedVector2Array([_to_screen(exhaust_end), _to_screen(exhaust_start)])
-			exhaust_glow.width = 12.0 + 3.5 * trail_alpha
-			exhaust_glow.default_color = _color_with_alpha(exhaust_color, 0.22 + trail_alpha * 0.24)
+			exhaust_glow.width = 9.0 + 3.5 * trail_alpha
+			exhaust_glow.modulate = Color(exhaust_color, 0.50 + trail_alpha * 0.26)
 		var light: PointLight2D = missile["light"] as PointLight2D
 		if is_instance_valid(light):
 			light.position = _to_screen(pos)
@@ -2566,11 +3224,13 @@ func _update_player_missiles(delta: float) -> void:
 		var exhaust_light: PointLight2D = missile["exhaust_light"] as PointLight2D
 		if is_instance_valid(exhaust_light):
 			exhaust_light.position = _to_screen(pos - direction * 28.0)
-			exhaust_light.energy = 1.2 + trail_alpha * 1.8
+			exhaust_light.energy = 0.0 if bool(missile.get("mortar", false)) else 1.2 + trail_alpha * 1.8
 			exhaust_light.texture_scale = 1.35 + trail_alpha * 1.0
 		var hit: bool = t >= 1.0 or pos.distance_to(resolved_target["pos"]) < 28.0
 		if hit:
 			var damage_amount: int = int(missile["damage"])
+			_play_weapon_sound("rocket_hit")
+			_play_weapon_sound("metal_hit")
 			_apply_damage_to_target(resolved_target, damage_amount, color)
 			if i < player_missiles.size():
 				var current_missile: Dictionary = player_missiles[i]
@@ -2638,6 +3298,7 @@ func _spawn_impact_sparks(world_pos: Vector2, color: Color, count: int) -> void:
 func _spawn_vehicle_explosion(world_pos: Vector2) -> void:
 	if impact_spark_root == null:
 		return
+	_spawn_explosion_cloud(world_pos)
 	var palette := [
 		Color("#fff7d1"),
 		Color("#ffdd76"),
@@ -2646,7 +3307,7 @@ func _spawn_vehicle_explosion(world_pos: Vector2) -> void:
 		Color("#9dfff1")
 	]
 	for ring in range(3):
-		var count: int = 34 + ring * 18
+		var count: int = 12 + ring * 6
 		for i in range(count):
 			var hot_core: bool = ring == 0
 			var color: Color = palette[road_bump_rng.randi_range(0, palette.size() - 1)]
@@ -2687,6 +3348,54 @@ func _spawn_vehicle_explosion(world_pos: Vector2) -> void:
 		})
 	_trim_impact_sparks(520)
 
+func _spawn_explosion_cloud(world_pos: Vector2) -> void:
+	if explosion_shader == null:
+		explosion_shader = Shader.new()
+		explosion_shader.code = """
+shader_type canvas_item;
+render_mode unshaded;
+uniform float age;
+uniform float seed;
+void fragment() {
+	vec2 p = UV * 2.0 - 1.0;
+	float r = length(p);
+	float a = atan(p.y, p.x + 0.0001);
+	float lobe = sin(a * 5.0 + seed) * 0.10 + sin(a * 9.0 - age * 2.0) * 0.045;
+	float grain = sin(p.x * 25.0 + sin(p.y * 19.0) * 2.0) * sin(p.y * 29.0 - age * 3.0);
+	float radius = mix(0.14, 0.66, 1.0 - exp(-age * 4.5));
+	float edge = r + lobe + grain * 0.045;
+	float smoke = (1.0 - smoothstep(radius - 0.12, radius + 0.16, edge)) * (0.52 + grain * 0.14);
+	float fire = (1.0 - smoothstep(radius * 0.35, radius, edge)) * (1.0 - smoothstep(0.12, 0.58, age));
+	float flash = exp(-age * 24.0) * (1.0 - smoothstep(0.0, 0.38, r));
+	vec3 ember = mix(vec3(0.85, 0.19, 0.035), vec3(1.0, 0.74, 0.30), clamp(fire + flash, 0.0, 1.0));
+	vec3 color = mix(vec3(0.17, 0.145, 0.13), ember, clamp(fire * 1.6 + flash, 0.0, 1.0));
+	color = mix(color, vec3(1.0, 0.96, 0.82), flash);
+	COLOR = vec4(color, max(smoke, max(fire, flash)) * (1.0 - smoothstep(0.62, 1.45, age)) * (1.0 - smoothstep(0.84, 0.99, r)));
+}
+"""
+	var cloud := ColorRect.new()
+	cloud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cloud.size = Vector2(192.0, 192.0)
+	var material := ShaderMaterial.new()
+	material.shader = explosion_shader
+	material.set_shader_parameter("seed", road_bump_rng.randf_range(0.0, TAU))
+	cloud.material = material
+	impact_spark_root.add_child(cloud)
+	var flash := PointLight2D.new()
+	flash.texture = _make_radial_light_texture(Color.WHITE)
+	flash.color = Color("#ff9a45")
+	flash.texture_scale = 2.2
+	cloud.add_child(flash)
+	flash.position = cloud.size * 0.5
+	var animate := func(age: float) -> void:
+		cloud.position = _to_screen(world_pos) - cloud.size * 0.5
+		material.set_shader_parameter("age", age)
+		flash.energy = 3.8 * exp(-age * 13.0)
+	animate.call(0.0)
+	var tween := cloud.create_tween()
+	tween.tween_method(animate, 0.0, 1.45, 1.45)
+	tween.tween_callback(cloud.queue_free)
+
 func _trim_impact_sparks(limit: int) -> void:
 	if impact_sparks.size() <= limit:
 		return
@@ -2713,10 +3422,10 @@ func _update_impact_sparks(delta: float) -> void:
 			var t: float = clamp(age / life, 0.0, 1.0)
 			var origin: Vector2 = spark["world_pos"]
 			var velocity: Vector2 = spark["velocity"]
-			var pos: Vector2 = origin + velocity * age
+			var pos: Vector2 = origin + velocity * age * (1.0 - 0.46 * t)
 			var dir: Vector2 = velocity.normalized() if velocity.length() > 0.01 else Vector2.RIGHT
 			var head: Vector2 = _to_screen(pos)
-			var tail: Vector2 = _to_screen(pos - dir * float(spark["length"]) * lerp(1.0, 0.25, t))
+			var tail: Vector2 = _to_screen(pos - dir * minf(origin.distance_to(pos), float(spark["length"]) * (1.0 - t)))
 			line.points = PackedVector2Array([tail, head])
 			line.width = max(0.12, lerp(float(spark["width"]), 0.12, t))
 			var spark_color: Color = spark["color"]
@@ -2908,18 +3617,155 @@ func _update_destination_marker() -> void:
 		destination_marker_root.visible = false
 		return
 	var pulse: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.004)
-	var outer_radius: float = lerp(18.0, 25.0, pulse)
-	var core_radius: float = lerp(7.0, 10.0, pulse)
 	destination_marker_root.visible = true
 	destination_marker_root.position = _to_screen(game.travel_final_pos)
-	destination_marker_glow.polygon = _make_circle_polygon(outer_radius, 48)
-	destination_marker_glow.color = Color("#dfffd8", lerp(0.09, 0.18, pulse))
-	destination_marker_core.polygon = _make_circle_polygon(core_radius, 40)
-	destination_marker_core.color = Color("#f5fff1", lerp(0.22, 0.34, pulse))
-	destination_marker_ring.points = _make_ring_points(lerp(14.0, 19.0, pulse), 48)
-	destination_marker_ring.default_color = Color("#f8fff4", lerp(0.52, 0.78, pulse))
-	destination_marker_light.energy = lerp(0.62, 1.05, pulse)
+	destination_marker_glow.hide()
+	destination_marker_core.hide()
+	destination_marker_ring.hide()
+	destination_marker_light.energy = lerp(0.20, 0.38, pulse)
 	destination_marker_light.texture_scale = lerp(1.15, 1.65, pulse)
+
+func _clear_mount_target(slot: int) -> void:
+	weapon_orders.erase(slot)
+	primary_pirate_targeted_by.erase(slot)
+	for enemy in debug_pirates:
+		var marks: Array = enemy.get("targeted_by", [])
+		marks.erase(slot)
+	for car in friendly_cars:
+		var marks: Array = car.get("targeted_by", [])
+		marks.erase(slot)
+	if selected_weapon_index == slot:
+		selected_weapon_index = -1
+
+func _turret_kind(kit: Dictionary) -> String:
+	for kind in ["cannon", "pulse", "rail", "shotgun"]:
+		if kit.get(kind, false):
+			return kind
+	return "laser"
+
+func turret_module_texture(kit: Dictionary) -> Texture2D:
+	match _turret_kind(kit):
+		"cannon": return cannon_texture
+		"pulse": return pulse_texture
+		"rail": return rail_texture
+		"shotgun": return shotgun_texture
+	return turret_texture
+
+func configure_aux_laser(kit: Dictionary) -> void:
+	if is_instance_valid(aux_laser):
+		aux_laser.queue_free()
+		aux_laser = null
+	_clear_mount_target(2)
+	aux_turret_kit = kit
+	aux_laser_cooldown = 0.0
+	if kit.is_empty() or not player_van_equipped:
+		return
+	var kind := _turret_kind(kit)
+	var surface: Texture2D = {"laser": laser_surface, "cannon": cannon_surface, "pulse": pulse_surface, "rail": rail_surface, "shotgun": shotgun_surface}.get(kind)
+	if surface == null:
+		surface = laser_surface
+	if surface == null:
+		return
+	aux_laser = Sprite2D.new()
+	aux_laser.texture = surface
+	aux_laser.scale = Vector2.ONE * ((12.5 if kind == "rail" or kind == "cannon" else 8.8) / surface.get_width())
+	aux_laser.offset.y = -surface.get_height() * 0.16 if kind == "rail" else 0.0
+	aux_laser.position = Vector2(0.0, 17.4) if active_body_model == "gt" or active_body_model == "minibus" else Vector2(0.0, 3.0)
+	aux_laser.z_index = 4
+	vehicle_root.add_child(aux_laser)
+
+func configure_extra_rockets(equipped: bool) -> void:
+	if is_instance_valid(extra_rockets):
+		extra_rockets.queue_free()
+		extra_rockets = null
+	_clear_mount_target(3)
+	extra_rocket_cooldown = 0.0
+	if not equipped or active_body_model != "gt" or rocket_module_texture == null:
+		return
+	extra_rockets = Sprite2D.new()
+	extra_rockets.texture = rocket_module_texture
+	extra_rockets.scale = Vector2(10.0, 22.0) / rocket_module_texture.get_size()
+	extra_rockets.position = Vector2(8.0, 17.0)
+	extra_rockets.z_index = 4
+	vehicle_root.add_child(extra_rockets)
+
+func _fire_aux_turret(target: Dictionary) -> void:
+	var kind := _turret_kind(aux_turret_kit)
+	var end: Vector2 = target["pos"]
+	var start: Vector2 = Vector2(game.player_pos) + vehicle_root.transform.basis_xform(aux_laser.position)
+	start += start.direction_to(end) * (9.0 if kind == "cannon" or kind == "rail" else 3.4)
+	var color := _weapon_color(2)
+	if kind == "cannon":
+		_play_cannon_burst()
+		for i in range(CANNON_ROUNDS):
+			get_tree().create_timer(i * CANNON_INTERVAL).timeout.connect(_draw_aux_shot.bind(start, end, color, kind))
+	else:
+		_play_weapon_sound(kind)
+		_draw_aux_shot(start, end, color, kind)
+	_apply_damage_to_target(target, road_bump_rng.randi_range(int(aux_turret_kit.get("min_damage", 5)), int(aux_turret_kit.get("max_damage", 9))), color)
+	_play_weapon_sound("metal_hit")
+
+func _draw_aux_shot(start: Vector2, end: Vector2, color: Color, kind: String) -> void:
+	if kind == "cannon":
+		var forward := start.direction_to(end)
+		_eject_cannon_casing(start - forward * 9.0, forward)
+		var flash := _make_laser_line(4.0, Color("#fff0be"))
+		flash.z_index = 53
+		add_child(flash)
+		flash.points = PackedVector2Array([_to_screen(start), _to_screen(start + forward * 13.0)])
+		var fade := flash.create_tween()
+		fade.tween_property(flash, "modulate:a", 0.0, 0.045)
+		fade.tween_callback(flash.queue_free)
+	var width := 4.0 if kind == "pulse" or kind == "rail" else 2.0
+	var beam := _make_laser_line(width, color)
+	beam.z_index = 53
+	add_child(beam)
+	var animate := func(alpha: float) -> void:
+		var tip := end if kind != "cannon" else start.lerp(end, 1.0 - alpha)
+		var tail := start if kind != "cannon" else tip.move_toward(start, 30.0)
+		beam.points = PackedVector2Array([_to_screen(tail), _to_screen(tip)])
+		beam.modulate.a = alpha
+	animate.call(1.0)
+	var tween := beam.create_tween()
+	tween.tween_method(animate, 1.0, 0.0, 0.18)
+	tween.tween_callback(beam.queue_free)
+
+func _eject_cannon_casing(mount: Vector2, forward: Vector2) -> void:
+	var side := forward.rotated(PI * 0.5)
+	var origin := mount + side * 7.0
+	var drift := side * randf_range(23.0, 43.0) - forward * randf_range(7.0, 21.0)
+	var casing := Node2D.new()
+	casing.z_index = 53
+	add_child(casing)
+	var brass := _make_laser_line(2.8, Color("#c08a45"))
+	brass.points = PackedVector2Array([Vector2(-2.8, 0), Vector2(2.8, 0)])
+	casing.add_child(brass)
+	var rim := _make_laser_line(2.9, Color("#ffe0a0"))
+	rim.points = PackedVector2Array([Vector2(1.6, 0), Vector2(2.8, 0)])
+	casing.add_child(rim)
+	var spin := randf_range(7.0, 12.0)
+	var update := func(t: float) -> void:
+		var travel := 1.0 - pow(1.0 - t, 3.0)
+		var bounce := absf(sin(t * TAU * 1.5)) * (1.0 - t) * 5.0
+		casing.position = _to_screen(origin + drift * travel) - Vector2(0, bounce)
+		casing.rotation = forward.angle() + spin * travel
+		casing.modulate.a = 1.0 - smoothstep(0.48, 1.0, t)
+	update.call(0.0)
+	var flight := casing.create_tween()
+	flight.tween_method(update, 0.0, 1.0, randf_range(0.52, 0.78))
+	flight.tween_callback(casing.queue_free)
+
+func _aim_player_mount(mount: Sprite2D, slot: int) -> void:
+	if not is_instance_valid(mount) or not mount.visible:
+		return
+	var target := _resolve_weapon_target(slot)
+	if target.is_empty():
+		mount.rotation = 0.0
+		return
+	var target_pos: Vector2 = target["pos"]
+	var local_target := vehicle_root.transform.affine_inverse().basis_xform(target_pos - Vector2(game.player_pos))
+	var pivot := _turret_mount_position() if slot == 0 else mount.position
+	mount.rotation = (local_target - pivot).angle() + PI * 0.5
 
 func _update_vehicle_node(screen_pos = null, angle = null) -> void:
 	if vehicle_root == null:
@@ -2934,6 +3780,19 @@ func _update_vehicle_node(screen_pos = null, angle = null) -> void:
 	vehicle_root.rotation = vehicle_angle + PI * 0.5 + _bump_rotation()
 	vehicle_root.scale = Vector2(1.0 + abs(pitch) * 0.005 + abs(roll) * 0.003, 1.0 - abs(pitch) * 0.006)
 	vehicle_root.skew = roll * 0.032
+	_aim_player_mount(player_turret, 0)
+	_aim_player_mount(aux_laser, 2)
+	_aim_player_mount(extra_rockets, 3)
+	if player_mortar_equipped and is_instance_valid(player_rocket_module):
+		player_rocket_module.rotation = 0.0
+	else:
+		_aim_player_mount(player_rocket_module, 1)
+	if is_instance_valid(player_turret):
+		var recoil := 0.0
+		if player_cannon_equipped and player_fire_phase > 0.0:
+			var elapsed := player_fire_duration - player_fire_phase
+			recoil = 1.0 - smoothstep(0.0, 0.035, fposmod(elapsed, CANNON_INTERVAL))
+		player_turret.position = _turret_mount_position() + Vector2.DOWN.rotated(player_turret.rotation) * recoil
 	var wheel_angle = game.vehicle_steer * 0.75
 	wheel_left_pivot.rotation = wheel_angle
 	wheel_right_pivot.rotation = wheel_angle
@@ -2954,21 +3813,30 @@ func _update_vehicle_node(screen_pos = null, angle = null) -> void:
 	front_right_light.texture_scale = 0.94 + right_bounce * 0.28
 	front_left_light.enabled = true
 	front_right_light.enabled = true
-	front_overlay_sprite.visible = true
+	if pickup_texture != null:
+		front_left_light.position = Vector2(-6.5, -27.5 - left_bounce * 6.0)
+		front_right_light.position = Vector2(6.5, -27.5 - right_bounce * 6.0)
+	if player_van_equipped:
+		front_left_light.position = Vector2(-6.5, -30.5 - left_bounce * 6.0)
+		front_right_light.position = Vector2(6.5, -30.5 - right_bounce * 6.0)
+	front_overlay_sprite.visible = pickup_texture == null and not player_van_equipped
 	var front_overlay_alpha: float = 1.0 if game.is_traveling else 0.46
 	front_overlay_sprite.modulate = Color(1.0, 1.0, 1.0, front_overlay_alpha)
 
 	var brake_energy := 1.35 if game.vehicle_is_braking else 0.48
 	var rear_energy := brake_energy if (game.vehicle_is_braking or not game.is_traveling) else 0.0
-	rear_left_light.position = Vector2(-8, 30)
-	rear_right_light.position = Vector2(8, 30)
+	rear_left_light.position = Vector2(-7, 26) if pickup_texture != null else Vector2(-8, 30)
+	rear_right_light.position = Vector2(7, 26) if pickup_texture != null else Vector2(8, 30)
+	if player_van_equipped:
+		rear_left_light.position = Vector2(-7.6, 32.5)
+		rear_right_light.position = Vector2(7.6, 32.5)
 	rear_left_light.energy = rear_energy
 	rear_right_light.energy = rear_energy
 	rear_left_light.texture_scale = 0.24 if game.vehicle_is_braking else 0.16
 	rear_right_light.texture_scale = rear_left_light.texture_scale
 	rear_left_light.enabled = rear_energy > 0.0
 	rear_right_light.enabled = rear_energy > 0.0
-	back_overlay_sprite.visible = not game.is_traveling or game.vehicle_is_braking
+	back_overlay_sprite.visible = pickup_texture == null and not player_van_equipped and (not game.is_traveling or game.vehicle_is_braking)
 	var pirate_light_on_player: float = _pirate_headlight_factor(game.player_pos)
 	var lit_tint := Color(1.0, 0.94, 0.78, 1.0)
 	var base_tint := Color.WHITE
@@ -3032,12 +3900,19 @@ func _spawn_damage_popup(amount: int, world_pos: Vector2, health_ratio: float) -
 	label.size = Vector2(86.0, 44.0)
 	label.pivot_offset = label.size * 0.5
 	label.add_theme_font_size_override("font_size", 20)
+	if overlay != null:
+		var lamp_font: Font = overlay.get("neon_font")
+		if lamp_font != null:
+			label.add_theme_font_override("font", lamp_font)
+	label.add_theme_constant_override("outline_size", 4)
 	label.add_theme_color_override("font_shadow_color", Color("#06130b", 0.80))
 	label.add_theme_constant_override("shadow_offset_x", 0)
 	label.add_theme_constant_override("shadow_offset_y", 2)
 	add_child(label)
 
 	var damage_color: Color = _health_color(health_ratio).lightened(0.12)
+	label.add_theme_color_override("font_color", damage_color.lightened(0.35))
+	label.add_theme_color_override("font_outline_color", Color(damage_color, 0.42))
 	damage_popups.append({
 		"label": label,
 		"world_pos": world_pos,
@@ -3074,11 +3949,12 @@ func _update_damage_popup_label(popup: Dictionary) -> void:
 	var t: float = clamp(age / life, 0.0, 1.0)
 	var world_pos: Vector2 = popup["world_pos"]
 	var screen_pos: Vector2 = _to_screen(world_pos)
-	var base_color: Color = popup["color"]
 	var fade: float = 1.0 - smoothstep(0.18, 1.0, t)
+	var ignition := smoothstep(0.0, 0.055, age)
+	var flicker := 1.0 - 0.38 * pow(maxf(0.0, sin(age * 103.0)), 5.0) * (1.0 - smoothstep(0.05, 0.30, age))
 	label.position = screen_pos + Vector2(-43.0, -82.0)
 	label.scale = Vector2.ONE * lerp(0.82, 1.55, t)
-	label.modulate = Color(base_color.r, base_color.g, base_color.b, fade)
+	label.modulate.a = fade * ignition * flicker
 
 func _make_rect_polygon(position: Vector2, rect_size: Vector2) -> PackedVector2Array:
 	return PackedVector2Array([
@@ -3092,6 +3968,7 @@ func _update_world_nodes(delta: float) -> void:
 	if world_root == null or game == null:
 		return
 	var hover_lerp: float = clamp(delta * 8.0, 0.0, 1.0)
+	var time: float = Time.get_ticks_msec() * 0.001
 	world_root.position = -camera_offset
 
 	for i in range(heat_nodes.size()):
@@ -3099,15 +3976,6 @@ func _update_world_nodes(delta: float) -> void:
 		var water = float(d.water) / 100.0
 		var color = Color("#b55a45").lerp(Color("#3fa7c9"), water)
 		heat_nodes[i].color = Color(color.r, color.g, color.b, 0.10)
-
-	for key in route_lines.keys():
-		var entry = route_lines[key]
-		var line: Line2D = entry.line
-		var from: int = entry.from
-		var to: int = entry.to
-		var is_current_route: bool = game.at_location and (from == game.current_district or to == game.current_district)
-		line.default_color = Color("#d8e4e5", 0.18) if is_current_route else Color("#d8e4e5", 0.12)
-		line.width = 10.5 if is_current_route else 7.5
 
 	for entry in district_nodes:
 		var index: int = entry.index
@@ -3121,7 +3989,7 @@ func _update_world_nodes(delta: float) -> void:
 		var is_hovered: bool = index == hovered_district
 		var is_selected: bool = index == game.selected_district
 		var radius: float = 32.0 if has_sprite else (24.0 if game.at_location and index == game.current_district else 17.0)
-		marker.polygon = _make_circle_polygon(radius, 32)
+		marker.scale = Vector2.ONE * (radius / (22.0 if has_sprite else 17.0))
 		marker.color = Color(game.FACTIONS[game.districts[index].faction].color, 0.0) if has_sprite else game.FACTIONS[game.districts[index].faction].color
 		if sprite != null:
 			var target_modulate := Color.WHITE
@@ -3135,7 +4003,6 @@ func _update_world_nodes(delta: float) -> void:
 			sprite.modulate = sprite.modulate.lerp(target_modulate, hover_lerp)
 			sprite.scale = sprite.scale.lerp(target_scale, hover_lerp)
 			if light_sprite != null:
-				var time: float = Time.get_ticks_msec() * 0.001
 				var flicker: float = 0.82 + sin(time * 1.15 + float(index) * 1.7) * 0.018 + sin(time * 2.4 + float(index)) * 0.010
 				light_sprite.scale = sprite.scale
 				light_sprite.modulate = Color(1.0, 0.88, 0.55, flicker)
@@ -3144,9 +4011,8 @@ func _update_world_nodes(delta: float) -> void:
 					location_glow.energy = lerp(0.58, 0.68, glow_wave)
 					location_glow.texture_scale = lerp(2.35, 2.85, glow_wave)
 		if name_glow != null:
-			var name_wave: float = 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.001 * 0.45 + float(index) * 0.8)
-			name_glow.position = Vector2(0.0, -98.0 if has_sprite else -38.0)
-			var target_name_energy: float = lerp(1.45, 2.15, name_wave) * (1.95 if is_hovered else 1.0)
+			var name_wave: float = 0.5 + 0.5 * sin(time * 0.45 + float(index) * 0.8)
+			var target_name_energy: float = lerp(1.65, 1.85, name_wave) * (1.65 if is_hovered else 1.0)
 			var target_name_scale: float = lerp(2.85, 4.15, name_wave) * (1.22 if is_hovered else 1.0)
 			name_glow.energy = lerp(name_glow.energy, target_name_energy, hover_lerp)
 			name_glow.texture_scale = lerp(name_glow.texture_scale, target_name_scale, hover_lerp)
@@ -3161,10 +4027,10 @@ func _update_world_nodes(delta: float) -> void:
 			target_ring_radius = radius + 9.0
 			target_ring_color = Color("#e7ecef", 0.62)
 			target_ring_width = 2.5
-		var current_ring_radius: float = ring.points[0].length() if ring.points.size() > 0 else target_ring_radius
-		ring.points = _make_ring_points(lerp(current_ring_radius, target_ring_radius, hover_lerp), 48)
+		var ring_scale: float = lerpf(ring.scale.x, target_ring_radius / 22.0, hover_lerp)
+		ring.scale = Vector2.ONE * ring_scale
 		ring.default_color = ring.default_color.lerp(target_ring_color, hover_lerp)
-		ring.width = lerp(ring.width, target_ring_width, hover_lerp)
+		ring.width = lerp(ring.width, target_ring_width / ring_scale, hover_lerp)
 
 func _update_cloud_props(delta: float) -> void:
 	if clouds_root == null or game == null:
@@ -3191,7 +4057,7 @@ func _spawn_cloud_prop() -> void:
 	var prop := {
 		"sprite": sprite,
 		"velocity": cloud_wind_velocity * drift_scale,
-		"max_alpha": cloud_rng.randf_range(0.52, 0.90),
+		"max_alpha": cloud_rng.randf_range(0.38, 0.76),
 		"age": 0.0
 	}
 	cloud_props.append(prop)
@@ -3199,6 +4065,10 @@ func _spawn_cloud_prop() -> void:
 
 func _update_cloud_visibility(delta: float) -> void:
 	var stale: Array = []
+	var bounds := _cloud_visible_bounds()
+	var center := bounds.get_center()
+	var jump_distance_sq := pow(maxf(size.x, size.y) * 1.35, 2.0)
+	var weapon_tint := _hovered_weapon_color().lightened(0.18)
 	for prop in cloud_props:
 		var sprite: Sprite2D = prop["sprite"]
 		if not is_instance_valid(sprite):
@@ -3218,7 +4088,9 @@ func _update_cloud_visibility(delta: float) -> void:
 		var missile_light_factor: float = _missile_cloud_light_factor(sprite.position)
 		var destination_light_factor: float = _destination_cloud_light_factor(sprite.position)
 		var pirate_headlight_factor: float = _pirate_headlight_factor(sprite.position)
-		var target_alpha: float = max_alpha * fade_in * lerp(1.0, 1.34, light_factor)
+		var patch: float = sin(sprite.position.x * 0.0034 + sin(sprite.position.y * 0.0022)) * sin(sprite.position.y * 0.0031)
+		var density := lerpf(0.30, 0.91, smoothstep(-0.45, 0.60, patch))
+		var target_alpha: float = max_alpha * density * fade_in * lerp(1.0, 1.34, light_factor)
 		target_alpha *= lerp(1.0, 1.04, route_light_factor)
 		target_alpha *= lerp(1.0, 1.65, health_light_factor)
 		target_alpha *= lerp(1.0, 1.22, weapon_range_light_factor)
@@ -3230,7 +4102,7 @@ func _update_cloud_visibility(delta: float) -> void:
 		var target_tint: Color = Color(0.88, 0.96, 0.98, 1.0).lerp(Color(1.0, 0.72, 0.36, 1.0), light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.44, 1.0, 0.66, 1.0), route_light_factor * 0.12)
 		target_tint = target_tint.lerp(Color(0.36, 1.0, 0.56, 1.0), health_light_factor)
-		target_tint = target_tint.lerp(_hovered_weapon_color().lightened(0.18), weapon_range_light_factor * 0.58)
+		target_tint = target_tint.lerp(weapon_tint, weapon_range_light_factor * 0.58)
 		target_tint = target_tint.lerp(_color_with_alpha(_laser_cloud_color(sprite.position).lightened(0.25), 1.0), laser_light_factor)
 		target_tint = target_tint.lerp(_missile_cloud_color(sprite.position).lightened(0.22), missile_light_factor * 0.85)
 		target_tint = target_tint.lerp(Color(0.92, 1.0, 0.86, 1.0), destination_light_factor)
@@ -3242,9 +4114,8 @@ func _update_cloud_visibility(delta: float) -> void:
 		color.b = lerp(color.b, target_tint.b, tint_lerp)
 		color.a = lerp(color.a, target_alpha, 0.10)
 		sprite.modulate = color
-		if not _cloud_visible_bounds().has_point(sprite.position):
-			var center: Vector2 = _cloud_visible_bounds().get_center()
-			var jumped_far: bool = sprite.position.distance_to(center) > max(size.x, size.y) * 1.35
+		if not bounds.has_point(sprite.position):
+			var jumped_far: bool = sprite.position.distance_squared_to(center) > jump_distance_sq
 			_reposition_cloud_prop(prop, not jumped_far)
 	for prop in stale:
 		cloud_props.erase(prop)
@@ -3281,7 +4152,7 @@ func _city_cloud_light_factor(world_pos: Vector2) -> float:
 	for district in game.districts:
 		var district_name: String = district.name
 		var district_pos: Vector2 = district.pos
-		var label_pos: Vector2 = district_pos + Vector2(0.0, -98.0 if location_textures.has(district_name) else -38.0)
+		var label_pos: Vector2 = district_pos + Vector2(0.0, -132.0 if location_textures.has(district_name) else -62.0)
 		var label_distance: float = world_pos.distance_to(label_pos)
 		var label_light: float = clamp(1.0 - label_distance / 620.0, 0.0, 1.0)
 		best = max(best, pow(label_light, 1.18) * 1.35)
@@ -3453,7 +4324,9 @@ func _update_travel_route() -> void:
 		return
 	var signature := _travel_route_signature()
 	travel_route_refresh_timer = max(0.0, travel_route_refresh_timer - get_process_delta_time())
-	if signature == travel_route_signature and travel_route_refresh_timer > 0.0:
+	if signature == travel_route_signature:
+		return
+	if game.is_traveling and travel_route_refresh_timer > 0.0:
 		return
 	travel_route_signature = signature
 	travel_route_refresh_timer = 0.10 if game.is_traveling else 0.35
@@ -3486,14 +4359,15 @@ func _travel_route_signature() -> String:
 	for waypoint in game.travel_waypoints:
 		var point: Vector2 = waypoint
 		waypoint_key = int(fposmod(float(waypoint_key * 31) + point.x * 0.07 + point.y * 0.11, 100000.0))
-	return "%s|%s|%s|%d|%d|%d|%d|%s" % [pos_key, target_key, final_key, speed_key, angle_key, game.travel_waypoints.size(), waypoint_key, game.travel_destination_name]
+	return "%s|%s|%s|%d|%d|%d|%d|%s|%s" % [pos_key, target_key, final_key, speed_key, angle_key, game.travel_waypoints.size(), waypoint_key, game.travel_destination_name, game.combat_mode]
 
 func _predict_vehicle_route() -> Array[Vector2]:
+	route_first_leg_end = 0
 	var points: Array[Vector2] = []
 	var sim_angle: float = game.vehicle_angle
 	if game.is_traveling and game.vehicle_velocity.length() > 2.0:
 		sim_angle = game.vehicle_velocity.angle()
-	var sim_pos: Vector2 = game.player_pos + Vector2.RIGHT.rotated(sim_angle) * 30.0
+	var sim_pos: Vector2 = game.player_pos
 	var sim_speed: float = max(55.0, game.vehicle_current_speed)
 	var targets: Array[Vector2] = []
 	targets.append(game.travel_target_pos)
@@ -3509,21 +4383,32 @@ func _predict_vehicle_route() -> Array[Vector2]:
 			var distance: float = to_target.length()
 			var is_final_target: bool = target_index == targets.size() - 1
 			var arrival_distance: float = game.CITY_GATE_ARRIVAL_DISTANCE if game.travel_target_district != -1 and is_final_target else game.WAYPOINT_PASS_RADIUS
-			if distance < arrival_distance:
+			if distance <= arrival_distance:
 				reached_target = true
 				break
 			var desired_angle := to_target.angle()
 			var angle_delta := wrapf(desired_angle - sim_angle, -PI, PI)
 			var steer: float = clamp(angle_delta, -game.vehicle_max_steer, game.vehicle_max_steer)
-			sim_angle += (sim_speed / game.vehicle_wheelbase) * tan(steer) * 0.10
-			sim_pos += Vector2.RIGHT.rotated(sim_angle) * sim_speed * 0.10
+			var leg_speed := minf(sim_speed, 48.0) if distance < 155.0 and absf(angle_delta) > 0.45 else sim_speed
+			sim_angle += game.route_turn_rate(leg_speed, steer, distance) * 0.10
+			sim_pos += Vector2.RIGHT.rotated(sim_angle) * leg_speed * 0.10
 			if i % 3 == 0:
 				points.append(sim_pos)
 		if reached_target:
 			sim_pos = target
 			points.append(target)
+			if target_index == 0:
+				route_first_leg_end = points.size() - 1
 		else:
+			if target_index == 0:
+				route_first_leg_end = points.size() - 1
 			break
+	var nose: Vector2 = points[0] + Vector2.RIGHT.rotated(float(game.vehicle_angle)) * 30.0
+	while points.size() > 2 and route_first_leg_end > 1 and points[0].distance_to(points[1]) < 30.0:
+		points.remove_at(1)
+		route_first_leg_end -= 1
+	if points.size() > 1 and nose.distance_to(points[1]) < Vector2(game.player_pos).distance_to(points[1]):
+		points[0] = nose
 	return points
 
 func _draw_dashed_polyline(points: Array[Vector2]) -> void:
@@ -3545,7 +4430,6 @@ func _draw_dashed_polyline(points: Array[Vector2]) -> void:
 		right_track.append(points[i] - normal * track_half_width)
 	_draw_single_dashed_track(left_track)
 	_draw_single_dashed_track(right_track)
-	_draw_turn_markers(points)
 
 func _draw_turn_markers(points: Array[Vector2]) -> void:
 	var markers: Array[Vector2] = _planned_turn_marker_points()
@@ -3624,6 +4508,8 @@ func _draw_single_dashed_track(points: Array[Vector2]) -> void:
 				var dash_points := PackedVector2Array([a + direction * cursor, a + direction * (cursor + step)])
 				var progress: float = clamp((traveled_len + cursor + step * 0.5) / max(1.0, total_len), 0.0, 1.0)
 				var alpha_scale: float = lerp(0.30, 1.0, progress)
+				if game.combat_mode:
+					alpha_scale = 1.0 if i < route_first_leg_end else 0.26
 				var glow := Line2D.new()
 				glow.points = dash_points
 				glow.width = 4.0
